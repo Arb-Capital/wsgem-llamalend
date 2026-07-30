@@ -47,15 +47,17 @@ constants, done.
 
 ```bash
 make deps && make build
-make test          # 98 unit + invariant tests, no RPC
-make test-fork     # 18 tests against live mainnet state (needs ETH_RPC_URL)
+make test          # 126 unit + invariant tests, no RPC
+make test-fork     # 28 tests against live mainnet state (needs ETH_RPC_URL)
 
 make oracle-dry    # simulate the oracle deploy against live state
 make market-dry    # simulate the whole market deploy, every assert running
 ```
 
-Deploy targets (`oracle-deploy`, `market-deploy`) sign from an encrypted keystore and each has a
-`-dry` twin that is the same command minus `--broadcast --verify`.
+Deploy targets (`oracle-deploy`, `market-deploy`) sign from an encrypted keystore. Each has a
+`-dry` twin that runs the same script keyless: no `--broadcast --verify`, no sender or keystore
+flags, and wallet-resolving environment variables stripped — so simulated addresses will not
+match a real deploy's.
 
 ## Docs
 
@@ -72,11 +74,11 @@ Deploy targets (`oracle-deploy`, `market-deploy`) sign from an encrypted keystor
 | [08-integration.md](docs/08-integration.md) | For consumers of a deployed market |
 | [reference/addresses.md](docs/reference/addresses.md) | Curve V2 infrastructure, identical per instance |
 
-## Two things worth knowing up front
+## Two things to know up front
 
 **Creating a market does not open one.** `LendFactory.create` is permissionless, but every market
 it produces has `borrow_cap == 0` and nothing in this repo can change that — only a Curve DAO vote
-calling `Configurator.set_borrow_cap`. That governance process is the long pole and should be
+calling `Configurator.set_borrow_cap`. That governance process is the slowest step and should be
 started before you deploy, not after. [docs/06](docs/06-post-deployment.md)
 
 **The NAV is published weekly by a permissioned key, and pausing publishes zero.** That single fact

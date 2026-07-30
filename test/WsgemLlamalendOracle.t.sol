@@ -43,6 +43,23 @@ contract WsgemLlamalendOracleTest is Test {
         new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
     }
 
+    function test_constructorRejectsAZeroWsgem() public {
+        vm.expectRevert(WsgemLlamalendOracle.ZeroAddress.selector);
+        new WsgemLlamalendOracle(IWsgem(address(0)), SPEED);
+    }
+
+    function test_constructorRejectsAWsgemWithAZeroGem() public {
+        MockWsgem noGem_ = new MockWsgem(address(0), address(pip), 18);
+        vm.expectRevert(WsgemLlamalendOracle.ZeroAddress.selector);
+        new WsgemLlamalendOracle(IWsgem(address(noGem_)), SPEED);
+    }
+
+    function test_constructorRejectsAWsgemWithAZeroPip() public {
+        MockWsgem noPip_ = new MockWsgem(address(gem), address(0), 18);
+        vm.expectRevert(WsgemLlamalendOracle.ZeroAddress.selector);
+        new WsgemLlamalendOracle(IWsgem(address(noPip_)), SPEED);
+    }
+
     function test_constructorRejectsANonEighteenDecimalWsgem() public {
         MockWsgem odd_ = new MockWsgem(address(gem), address(pip), 6);
         vm.expectRevert(WsgemLlamalendOracle.UnsupportedDecimals.selector);
@@ -181,13 +198,66 @@ contract WsgemLlamalendOracleTest is Test {
     }
 
     function test_aShortReturnFreezesToo() public {
+        // Poke a value the oracle has never reported before breaking the feed, so "froze at the
+        // cache" and "decoded the payload anyway" give different answers.
+        pip.poke(NAV0 * 2);
         pip.setMode(MockPip.Mode.SHORT_RETURN);
-        assertEq(oracle.price(), NAV0);
+        skip(7 days);
+        assertEq(oracle.price(), NAV0, "a short return must freeze, not decode");
+        assertTrue(oracle.frozen());
+        assertEq(oracle.price_w(), NAV0);
     }
 
     function test_aLongReturnIsReadAsItsFirstWord() public {
+        // A small rise the rate limit clears immediately: if the over-long return were treated as
+        // a pause the price would stay at NAV0, so the two behaviours are distinguishable.
+        uint256 higher_ = (NAV0 * (WAD + 0.0001e18)) / WAD;
+        pip.poke(higher_);
         pip.setMode(MockPip.Mode.LONG_RETURN);
-        assertEq(oracle.price(), NAV0, "an over-long return decodes to its first word");
+        skip(1 days);
+        assertEq(oracle.price(), higher_, "an over-long return decodes to its first word");
+        assertFalse(oracle.frozen());
+    }
+
+    function test_aGasBombPipIsCappedAndFreezes() public {
+        pip.poke(NAV0 * 2); // a value the oracle must NOT report if the bomb is absorbed
+        pip.setMode(MockPip.Mode.GAS_BOMB);
+        skip(7 days);
+
+        uint256 before_ = gasleft();
+        uint256 p_ = oracle.price();
+        uint256 used_ = before_ - gasleft();
+
+        assertEq(p_, NAV0, "a gas-burning pip is a pause with a different shape");
+        assertTrue(oracle.frozen());
+        assertLt(used_, 300_000, "the read must never forward more than PIP_READ_GAS to the feed");
+        assertEq(oracle.price_w(), NAV0);
+    }
+
+    function test_aReturndataBombFreezesUnderTheGasCap() public {
+        pip.poke(NAV0 * 2);
+        pip.setMode(MockPip.Mode.RETURNDATA_BOMB);
+        skip(7 days);
+
+        uint256 before_ = gasleft();
+        uint256 p_ = oracle.price();
+        uint256 used_ = before_ - gasleft();
+
+        assertEq(p_, NAV0, "a payload too large to build under the cap reads as a pause");
+        assertTrue(oracle.frozen());
+        assertLt(used_, 300_000, "the caller must never pay for an oversized payload");
+        assertEq(oracle.price_w(), NAV0);
+    }
+
+    function test_theReadPathSurvivesAGasBombOnABoundedBudget() public {
+        // An AMM read arrives with whatever gas the outer transaction has left. With the bomb
+        // armed, a 400k budget must still produce a price: the cap leaves the oracle enough to
+        // finish after the feed has burned its allowance.
+        pip.setMode(MockPip.Mode.GAS_BOMB);
+        (bool ok_, bytes memory ret_) =
+            address(oracle).staticcall{gas: 400_000}(abi.encodeWithSignature("price()"));
+        assertTrue(ok_, "price() must not propagate a feed out-of-gas");
+        assertEq(abi.decode(ret_, (uint256)), NAV0);
     }
 
     function test_freezeHoldsTheLastReportedPriceNotTheLastSpot() public {
@@ -211,6 +281,45 @@ contract WsgemLlamalendOracleTest is Test {
         }
         pip.poke(NAV0);
         assertGt(oracle.price(), 0);
+    }
+
+    // --- Events ----------------------------------------------------------------------------------
+
+    event PriceUpdated(uint256 indexed price, uint256 indexed spot);
+
+    function test_priceWEmitsTheReportedPriceWithTheRawSpotAlongside() public {
+        pip.poke(NAV0 * 10);
+        skip(1 days);
+
+        // One day of allowance, computed exactly as `_ceiling` does: rate first, then growth.
+        uint256 expected_ = NAV0 + (NAV0 * (SPEED * 1 days)) / WAD;
+
+        vm.expectEmit(true, true, false, true, address(oracle));
+        emit PriceUpdated(expected_, NAV0 * 10);
+        oracle.price_w();
+    }
+
+    function test_priceWDoesNotEmitWhenFlatOrThroughAFreeze() public {
+        vm.recordLogs();
+        oracle.price_w();
+        assertEq(vm.getRecordedLogs().length, 0, "no move, no event");
+
+        pip.poke(0);
+        skip(1 days);
+        vm.recordLogs();
+        oracle.price_w();
+        assertEq(vm.getRecordedLogs().length, 0, "a freeze is a report of the same value, not a move");
+    }
+
+    // --- Permissionlessness ------------------------------------------------------------------------
+
+    function test_priceWIsCallableByAnyArbitraryAddress() public {
+        pip.poke(NAV0 * 10);
+        skip(1 days);
+
+        vm.prank(address(0xBEEF));
+        uint256 p_ = oracle.price_w();
+        assertEq(p_, oracle.price(), "price_w carries no caller privilege of any kind");
     }
 
     // --- Ownerlessness ---------------------------------------------------------------------------
@@ -253,6 +362,27 @@ contract WsgemLlamalendOracleTest is Test {
     function testFuzz_priceAndPriceWAlwaysAgree(uint128 nav_, uint32 dt_) public {
         pip.poke(nav_);
         skip(dt_);
+        assertEq(oracle.price_w(), oracle.price());
+    }
+
+    /// @dev Unlike the single-step fuzz above, this one persists a checkpoint between the two
+    ///      pokes, so the second step is measured against a ratcheted cache rather than the
+    ///      constructor's.
+    function testFuzz_reportedPriceNeverExceedsSpotAcrossSteps(
+        uint128 nav1_,
+        uint128 nav2_,
+        uint32 dt1_,
+        uint32 dt2_
+    ) public {
+        vm.assume(nav1_ > 0 && nav2_ > 0);
+
+        pip.poke(nav1_);
+        skip(dt1_);
+        oracle.price_w();
+
+        pip.poke(nav2_);
+        skip(dt2_);
+        assertLe(oracle.price(), nav2_, "no checkpoint history may push the report past spot");
         assertEq(oracle.price_w(), oracle.price());
     }
 }

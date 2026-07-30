@@ -20,9 +20,6 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
     uint256 internal constant GAP       = 10 days;
     uint256 internal constant NAV0      = 1e18;
 
-    /// @dev The clamp Curve's HyperbolicDynamicMP applies to whatever the calculator reports.
-    uint256 internal constant MP_MAX_RATE = 47_564_687_975;
-
     MockPip              internal pip;
     MockGem              internal gem;
     MockWsgem            internal wsgem;

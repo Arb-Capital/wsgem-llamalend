@@ -38,7 +38,7 @@ oracle ............: 0x…
   wsgem ...........: 0x57C3571f10767E49C9d7b60feb6c67804783B7aE
   gem .............: 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287
   pip .............: 0x6A79dCe61A12aa4b75449e0B03746260765D07dF
-  max upside/sec ..: 115740740740
+  max upside/sec ..: 28935185185
   price ...........: <the live NAV, exactly>
 ---
 ```
@@ -59,10 +59,10 @@ cast call $ORACLE "PIP()(address)"          --rpc-url $ETH_RPC_URL   # must equa
 
 ## Step 2 — Watch it across a publication
 
-**Do not skip this.** The oracle is separable from the market precisely so it can be observed
-before anything depends on it, and the only interesting behaviour — a NAV step being absorbed by
-the rate limit — happens on a weekly cadence. A market deployed the same afternoon has never seen
-the shim do the one thing it exists to do.
+Do not skip this step. The oracle is separable from the market so it can be observed before
+anything depends on it, and the behaviour under observation — a NAV step being absorbed by the
+rate limit — occurs on a weekly cadence. A market deployed the same afternoon has not observed
+one.
 
 Over at least one publication, confirm:
 
@@ -133,7 +133,7 @@ WARNING: borrow_cap is 0. …
 
 `measured yield/sec: 0` and `target apr: ~1%` are **correct** at this point, not a fault: the rate
 calculator reports nothing until it has recorded two publications, so the policy sits on its
-floor. See [03](03-rate-calculator-and-monetary-policy.md#the-minimum-span).
+floor. See [03](03-rate-calculator-and-monetary-policy.md#the-minimum).
 
 If the run reverts with `controller address mispredicted`, someone else created a market between
 your simulation and your broadcast, moving the factory's nonce. Nothing is lost — the oracle and
@@ -141,8 +141,10 @@ calculator from the reverted run are still deployed and reusable. Re-run.
 
 ## Step 4 — Verify on-chain
 
-Everything below is already asserted by `_assertMarket` during the broadcast; this repeats it
-against final chain state, which is what belongs in the deployment record.
+Everything below is already asserted by `_assertMarket` — but note that forge runs the script
+body, asserts included, in the **pre-broadcast simulation**: nothing re-checks the transactions
+after they land. This readback against final chain state is the only post-broadcast
+verification; record its output in the deployment record.
 
 ```bash
 export FACTORY=0x8f6B56EC5ddF1F2691a1059f1D3cd97Ac9EaB0bd

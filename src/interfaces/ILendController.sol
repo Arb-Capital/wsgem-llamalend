@@ -44,7 +44,46 @@ interface ILendController {
         bytes calldata data
     ) external;
 
+    /// @dev Vyper default arguments generate one selector per prefix; this is the base form of
+    ///      `repay(_d_debt, _for, max_active_band, callbacker, calldata, shrink)`. Passing a
+    ///      `_d_debt` at or above the outstanding debt repays in full.
+    function repay(uint256 _d_debt) external;
+
+    function borrow_more(
+        uint256 collateral,
+        uint256 d_debt,
+        address _for,
+        address callbacker,
+        bytes calldata data
+    ) external;
+
+    function add_collateral(uint256 collateral, address _for) external;
+
+    function remove_collateral(uint256 collateral, address _for) external;
+
+    /// @dev Base form of `liquidate(user, min_x, _frac, callbacker, calldata)`. `_frac` is the
+    ///      fraction of the position to close, WAD-scaled; `1e18` closes it whole.
+    function liquidate(address user, uint256 min_x, uint256 _frac) external;
+
+    function tokens_to_liquidate(address user, uint256 frac) external view returns (uint256);
+
     function health(address user, bool full) external view returns (int256);
 
     function max_borrowable(uint256 _d_collateral, uint256 _N, address _user) external view returns (uint256);
+
+    function debt(address user) external view returns (uint256);
+
+    function loan_exists(address user) external view returns (bool);
+
+    /// @notice `[collateral_in_amm, borrowed_in_amm, debt, N]`.
+    function user_state(address user) external view returns (uint256[4] memory);
+
+    /// @dev One of the six V2 per-operation health previews; the others follow the same shape.
+    function create_loan_health_preview(
+        uint256 collateral,
+        uint256 debt,
+        uint256 N,
+        address _for,
+        bool full
+    ) external view returns (int256);
 }

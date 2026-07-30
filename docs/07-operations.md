@@ -2,9 +2,13 @@
 
 ## The complete privileged surface
 
-Three parties. Nothing else can touch a deployed market.
+Three parties — plus any per-market administrator the DAO appoints via `set_custom_admin`, who
+is then authorized for that market's per-market setters alongside the DAO.
 
 ### Curve DAO, through the Configurator
+
+Per-market setters. Authorized callers: the default admin (the Curve DAO), or the market's
+custom admin if one is set.
 
 | Call | Effect | Risk |
 |---|---|---|
@@ -14,7 +18,29 @@ Three parties. Nothing else can touch a deployed market.
 | `set_borrowing_discounts` | Moves LTV and liquidation threshold | High — can put live loans underwater |
 | `set_amm_fee` | Changes the AMM swap fee | Low |
 | `set_admin_percentage` | DAO's share of interest | Low |
-| `set_custom_admin` | Delegates the above per-controller | **Critical** |
+| `set_callback` | Attaches a liquidity-mining callback to the AMM | Medium — the AMM invokes it with a plain external call inside deposits, withdrawals and exchanges, so a reverting callback blocks those operations until it is removed |
+| `set_view` | Replaces the controller's view contract | Low — read path only; integrator previews route through it |
+
+Default-admin-only:
+
+| Call | Effect | Risk |
+|---|---|---|
+| `set_custom_admin` | Sets the market's custom-admin slot: that address becomes authorized for the per-market setters above, alongside the DAO | **Critical** — introduces a fourth principal for that market |
+| `set_owner` | Replaces the Configurator's default admin, across all markets | **Critical** |
+
+### Curve DAO, as `factory.admin()`
+
+A second admin slot, separate from the Configurator's `default_admin` — on mainnet both are the
+same DAO agent (see [reference/addresses.md](reference/addresses.md)), but they are changed by
+separate calls (`set_owner` on the Configurator, `transfer_ownership` on the factory).
+
+| Call | On | Effect | Risk |
+|---|---|---|---|
+| `set_max_supply` | Vault | Caps or disables vault deposits (`maxSupply`) | Medium — zero stops new deposits; withdrawals are unaffected |
+| `set_parameters` | Monetary policy | Rewrites the live rate curve (target utilization, low/high ratios, rate shift), within the constructor's bounds | Medium — the ~1%–150% APR clamp applies to the base rate only; `rate()` applies the ratios and shift on top of it, and the Controller caps what it charges at 300% APY (`MAX_RATE`) |
+| `set_default_fee_receiver` / `set_custom_fee_receiver` | Factory | Redirects the admin share of interest | Low |
+| `pause` / `unpause` | Factory | Stops or resumes new market creation | Low for a deployed market — existing markets are unaffected |
+| `transfer_ownership` | Factory | Replaces `factory.admin()` — the principal for every row in this table | **Critical** |
 
 ### wsgem governance, over the feed
 
@@ -26,8 +52,8 @@ Three parties. Nothing else can touch a deployed market.
 | Upgrade the feed's implementation | Arbitrary | Oracle treats a revert or short return as a pause |
 
 A NAV published downward moves collateral value instantly and can put loans into liquidation. That
-is deliberate — the alternative is holding a stale high price over collateral that has genuinely
-lost value — but it is the sharpest edge in the system and belongs in any risk write-up.
+is deliberate: the alternative is holding a stale high price over collateral that has genuinely
+lost value.
 
 ### This repo
 
@@ -48,11 +74,18 @@ cast call $ORACLE "frozen()(bool)"       --rpc-url $ETH_RPC_URL
 |---|---|---|
 | **Rate limit binding** | `price() < spotPrice()` for > 12h | A weekly step clears in ~6.5 hours, so 12h means either the yield outran `MAX_UPSIDE_SPEED` or someone published a jump. Investigate which. |
 | **Feed frozen** | `frozen() == true` for > 1h | Feed paused or its proxy broken. Collateral is being valued on a held price. |
-| **Publication missed** | No `PriceUpdated` with a changed spot in > 9 days | Cadence is weekly. Nine days is late. There is no on-chain staleness guard — this alarm is the guard. |
+| **Publication missed** | Polled `spotPrice()` unchanged in > 9 days | Cadence is weekly. Nine days is late. There is no on-chain staleness guard — this alarm is the guard. |
 | **NAV fell** | `spotPrice()` below its previous value | Passes straight through to collateral value. Check liquidation queue immediately. |
 
+Key the publication alarm on **polling `spotPrice()`**, not on `PriceUpdated` events: the event
+only fires when traffic drives `price_w`, so an idle market — including the entire
+`borrow_cap == 0` period before the DAO vote — emits nothing however many publications land. The
+same idleness also means nothing is checkpointing the rate calculator; that is harmless (both
+shims read the live feed), but it is why the event stream goes quiet, not the feed.
+
 `PriceUpdated(price, spot)` is emitted by `price_w` whenever the reported price moves, with the raw
-spot alongside — so the gap between the two is reconstructable from logs alone.
+spot alongside — so on a trafficked market the gap between the two is reconstructable from logs
+alone.
 
 ### The borrow rate is being set by something real
 
@@ -82,14 +115,23 @@ publications; if it is moving, the feed is overdue.
 Standard Llamalend surface: `total_debt()`, `borrow_cap()`, vault `totalAssets()` / `maxWithdraw()`
 for utilization, `users_to_liquidate()` for the liquidation queue, `borrow_apr()` / `lend_apr()`.
 
+### The administration has not moved
+
+`Configurator.admins(controller)` is the market's custom-admin slot: zero means no delegate is
+set; anything else is an address authorized for the per-market setters alongside the default
+admin. Poll it together with `Configurator.default_admin()` and `factory.admin()`; a change to
+any of the three changes who holds the levers above and should be tied to a known governance
+action. The monetary policy's `parameters()` likewise reports the live rate curve, so a
+`set_parameters` call is observable there.
+
 ## Incident response
 
 ### The feed is paused
 
 The oracle freezes; the market keeps working on the last good price. The rate calculator holds its
 last measurement through the grace period and then decays it. Borrowing, repayment and liquidation
-all continue. **Do not panic-close the market** — a zero borrow cap stops new borrowing
-but repayment and liquidation are what you want to keep open, and freezing already preserves both.
+all continue. Closing the market is not required: a zero borrow cap stops new borrowing, but
+repayment and liquidation are the operations to keep open, and freezing already preserves both.
 
 Watch for the pause outlasting a publication interval. Beyond that, collateral is being valued on a
 number nobody is standing behind, and the question becomes whether the DAO should lower the borrow
@@ -109,12 +151,12 @@ soft and then hard liquidation within the block.
 
 Liquidator depth is not the question: redemption through the wrapper is atomic, against the full
 supply, and slippage-free at the redemption bid, so an exit always exists at a known price. The
-questions are whether the collapse is *real* — a mistaken downward publication liquidates people
-irreversibly and there is no undo — and whether the market should be capped to zero to stop new
-borrowing against a falling asset.
+questions are whether the collapse is *real* — a mistaken downward publication liquidates
+positions irreversibly — and whether the market should be capped to zero to stop new borrowing
+against a falling asset.
 
-This is the failure the oracle does **not** guard. If it happens and the publication turns out to
-have been an error, the damage is already done.
+This is the failure the oracle does not guard: a liquidation caused by an erroneous publication
+cannot be reversed.
 
 ### The oracle needs replacing
 

@@ -25,7 +25,10 @@ coverage    :; forge coverage --no-match-path "test/fork/*"
 # deploy session may have left exported. forge binds ETH_FROM/--sender, ETH_KEYSTORE/--keystore,
 # ETH_KEYSTORE_ACCOUNT/--account and ETH_PASSWORD/--password, and couples them in argument
 # parsing, so a stray one turns a keyless simulation into a keystore prompt or a parse failure.
-KEYLESS := env -u ETH_FROM -u ETH_KEYSTORE -u ETH_KEYSTORE_ACCOUNT -u ETH_PASSWORD
+# The gas vars are stripped too: forge reads ETH_GAS_PRICE/ETH_PRIO_FEE from the environment
+# directly, an empty one is a parse error, and a simulation prices nothing anyway.
+KEYLESS := env -u ETH_FROM -u ETH_KEYSTORE -u ETH_KEYSTORE_ACCOUNT -u ETH_PASSWORD \
+               -u ETH_GAS_PRICE -u ETH_PRIO_FEE
 
 # Gas overrides are optional, so they must be omitted entirely when unset rather than passed empty:
 # `--priority-gas-price` with no value swallows the next flag as its argument, and forge exits.
@@ -47,18 +50,28 @@ define require_deploy_env
 	test -n "$${ETHERSCAN_API_KEY}"  || { echo "ETHERSCAN_API_KEY is required for --verify"; exit 1; }
 endef
 
+# The dry runs need only the RPC, but they need it guarded for the same reason GAS_FLAGS is: an
+# empty ${ETH_RPC_URL} makes `--rpc-url` swallow the next flag as its argument.
+define require_rpc
+	test -n "$${ETH_RPC_URL}" || { echo "ETH_RPC_URL is required"; exit 1; }
+endef
+
 # --- Oracle ------------------------------------------------------------------------------------
 #
 # The oracle shim is deployable on its own, ahead of the market, so its reported price can be
 # watched against the live wsgem across at least one NAV poke before anything depends on it.
 
-oracle-dry  :; make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPOracleScript \
-	--rpc-url ${ETH_RPC_URL} -vvvv
+# The forge lines are @-silenced: make would otherwise echo the expanded recipe, and the recipe
+# contains ETH_RPC_URL -- which for most providers embeds an API key -- into any log of the run.
+oracle-dry  :
+	@$(call require_rpc)
+	@make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPOracleScript \
+		--rpc-url ${ETH_RPC_URL} -vvvv
 
 oracle-deploy :
 	@$(call require_deploy_env)
 	make build
-	forge script script/WstGBP.s.sol:WstGBPOracleScript \
+	@forge script script/WstGBP.s.sol:WstGBPOracleScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
 
@@ -71,13 +84,15 @@ oracle-deploy :
 # WSGEM_ORACLE selects an already-deployed oracle shim; unset means the script deploys a fresh
 # one in the same run.
 
-market-dry  :; make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
-	--rpc-url ${ETH_RPC_URL} -vvvv
+market-dry  :
+	@$(call require_rpc)
+	@make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
+		--rpc-url ${ETH_RPC_URL} -vvvv
 
 market-deploy :
 	@$(call require_deploy_env)
 	make build
-	forge script script/WstGBP.s.sol:WstGBPMarketScript \
+	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
 

@@ -5,12 +5,12 @@ A created market is not an open market. Everything in
 `borrow_cap == 0`: lenders can deposit, nobody can borrow, and nothing in this repo can change
 that.
 
-Only the Curve DAO can. Start the governance conversation before you deploy — it is the long pole,
-and it is measured in weeks.
+Only the Curve DAO can. Start the governance conversation before you deploy — it is the slowest
+step, measured in weeks.
 
 ## Step 1 — Pre-vote verification
 
-Curve reviewers will check these; check them first.
+Check these before proposing.
 
 ```bash
 ID=$(cast call $FACTORY "vaults_index(address)(uint256)" $VAULT --rpc-url $ETH_RPC_URL)
@@ -56,17 +56,15 @@ observed, not to the ambition for it. Curve's own reference markets launched cap
 
 ### What the proposal should say
 
-Reviewers will want the reasoning, not the addresses:
+The proposal should carry the reasoning as well as the addresses:
 
 - The pair, and that it is like-kind — the collateral is a wrapper over the borrowed token.
-- **The NAV is published weekly by a permissioned key and can be paused to zero.** State this
-  plainly. It is the market's central risk and reviewers will find it anyway; the argument is not
-  that the risk is absent but that the oracle bounds it — up-moves rate-limited to 0.25%/day at a
-  measured cost of ~0.11 bp, down-moves immediate, a pause freezes rather than zeroes. See
-  [02-oracle-shim.md](02-oracle-shim.md).
+- **The NAV is published weekly by a permissioned key and can be paused to zero.** This is the
+  market's central risk. The mitigation is that the oracle bounds it — up-moves rate-limited to
+  0.25%/day at a measured cost of ~0.11 bp, down-moves immediate, a pause freezes rather than
+  zeroes. See [02-oracle-shim.md](02-oracle-shim.md).
 - **Redemption is atomic, against the full supply, and slippage-free**, so liquidator depth is not a
-  risk variable — an exit always exists at a known price. This is a genuinely strong point and
-  reviewers will not assume it.
+  risk variable — an exit always exists at a known price.
 - Why the parameters, especially that `liquidation_discount` clears the redemption spread.
 - That the monetary policy is Curve's own contract, with the bytecode argument.
 - That both shims are ownerless, and that the DAO retains `set_price_oracle` if either misbehaves.

@@ -90,7 +90,7 @@ pole. See [06-post-deployment.md](06-post-deployment.md).
 
 ## Trust surface
 
-Three parties, and it is worth being precise about which holds what.
+Three parties. Which holds what:
 
 **Curve DAO**, through the Configurator, over a live market:
 
@@ -102,6 +102,19 @@ Three parties, and it is worth being precise about which holds what.
 | `set_borrowing_discounts` | Moves LTV and the liquidation threshold. |
 | `set_amm_fee` | Changes the AMM swap fee. |
 | `set_admin_percentage` | Changes the DAO's share of interest. |
+| `set_callback` | Attaches a liquidity-mining callback to the AMM, invoked inside deposits, withdrawals and exchanges. |
+| `set_view` | Replaces the controller's view contract (read path; integrator previews route through it). |
+| `set_custom_admin` | Default-admin-only. Adds a per-market administrator authorized for the setters above, alongside the DAO — a fourth principal for that market. |
+| `set_owner` | Default-admin-only. Replaces the Configurator's default admin, across all markets. |
+
+And as `factory.admin()` — a separate admin slot; on mainnet the same DAO agent:
+
+| Call | Effect |
+|---|---|
+| `set_max_supply` | On the vault: caps or disables vault deposits. |
+| `set_parameters` | On the monetary policy: rewrites the live rate curve, within the constructor's bounds. |
+| `set_default_fee_receiver` / `set_custom_fee_receiver` | On the factory: redirects the admin share of interest. |
+| `transfer_ownership` | On the factory: replaces `factory.admin()`, the principal for the rows above. |
 
 **wsgem governance**, over the feed the shims read: publish any NAV, or pause it by publishing
 zero. The oracle bounds how fast a published number can raise reported collateral value, and never

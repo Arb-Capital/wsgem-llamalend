@@ -22,6 +22,13 @@ abstract contract WsgemLlamalendConfig {
     //
     // Identical for every wsgem. Recorded in docs/reference/addresses.md.
 
+    /// @notice The chain the addresses below live on. Every address in this config is
+    ///         chain-specific, so a deploy pointed at the wrong RPC must fail on this named
+    ///         check rather than on an opaque decode revert from a codeless factory.
+    function CHAIN_ID() public pure virtual returns (uint256) {
+        return 1;
+    }
+
     function FACTORY() public pure virtual returns (address) {
         return 0x8f6B56EC5ddF1F2691a1059f1D3cd97Ac9EaB0bd;
     }
@@ -90,6 +97,8 @@ abstract contract WsgemLlamalendConfig {
 abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
     /// @notice Checks that run before anything is broadcast, against live chain state.
     function _preflight() internal view virtual {
+        require(block.chainid == CHAIN_ID(), "wrong chain for this configuration");
+
         IWsgem wsgem_ = IWsgem(WSGEM());
         require(wsgem_.gem() == GEM(), "gem mismatch");
         require(wsgem_.decimals() == 18, "wsgem is not 18 decimals");
@@ -168,8 +177,13 @@ abstract contract WsgemOracleScript is WsgemLlamalendScript {
 /// @dev Market creation is permissionless, but the market it produces is inert: `borrow_cap` is
 ///      zero and only a Curve DAO vote can lift it. See docs/06-post-deployment.md.
 abstract contract WsgemMarketScript is WsgemLlamalendScript {
-    /// @dev Path is relative to the project root and covered by `fs_permissions` in foundry.toml.
+    /// @dev Paths are relative to the project root and covered by `fs_permissions` in foundry.toml.
     string internal constant MP_INITCODE_PATH = "script/bytecode/HyperbolicDynamicMP.initcode.hex";
+    string internal constant MP_RUNTIME_PATH  = "script/bytecode/HyperbolicDynamicMP.runtime.hex";
+
+    /// @dev What `HyperbolicDynamicMP.target_rate()` floors at, ~1% APR. A freshly created market
+    ///      sits exactly here, because its rate calculator cannot be measurable yet.
+    uint256 internal constant MP_MIN_TARGET_RATE = 317_097_920;
 
     struct Deployment {
         WsgemLlamalendOracle oracle;
@@ -184,8 +198,12 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         _preflight();
 
         // Reuse an oracle deployed and observed earlier where one is given; otherwise deploy a
-        // fresh one in this run.
-        address existing_ = vm.envOr("WSGEM_ORACLE", address(0));
+        // fresh one in this run. Read as a string first: `envOr` only falls back when the
+        // variable is UNSET, and a set-but-empty WSGEM_ORACLE -- the shape a templated .env
+        // produces -- must mean "none" rather than a parse revert.
+        address existing_ = address(0);
+        string memory rawOracle_ = vm.envOr("WSGEM_ORACLE", string(""));
+        if (bytes(rawOracle_).length != 0) existing_ = vm.parseAddress(rawOracle_);
 
         // Validate a supplied oracle BEFORE broadcasting anything. `LendFactory.create` only
         // checks that the price is non-zero and that `price_w()` agrees with `price()` -- both of
@@ -258,6 +276,15 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
             mp_ := create(0, add(code_, 0x20), mload(code_))
         }
         require(mp_ != address(0), "monetary policy deploy failed");
+
+        // What actually landed must be the vendored runtime plus this market's two immutables --
+        // nothing more, nothing less. A truncated or corrupted initcode file that still manages
+        // to deploy *something* is caught here, which is what makes the vendoring story
+        // self-enforcing at deploy time rather than resting on the test suite having been run.
+        bytes memory expected_ = abi.encodePacked(
+            vm.parseBytes(vm.readFile(MP_RUNTIME_PATH)), abi.encode(controller_, rateCalculator_)
+        );
+        require(keccak256(mp_.code) == keccak256(expected_), "monetary policy runtime mismatch");
     }
 
     /// @dev Extends the shared token checks with the market parameters the chain will enforce.
@@ -294,6 +321,7 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         // The wiring the factory does not report.
         require(IVault(d_.vault).asset() == GEM(), "vault: asset mismatch");
         require(IVault(d_.vault).controller() == d_.controller, "vault: controller mismatch");
+        require(IVault(d_.vault).maxSupply() == SUPPLY_LIMIT(), "vault: supply limit mismatch");
         require(IAMM(d_.amm).price_oracle_contract() == address(d_.oracle), "amm: oracle mismatch");
         require(IAMM(d_.amm).admin() == d_.controller, "amm: admin is not the controller");
         require(IAMM(d_.amm).A() == A(), "amm: A mismatch");
@@ -316,6 +344,21 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         IHyperbolicDynamicMP mp_ = IHyperbolicDynamicMP(d_.monetaryPolicy);
         require(mp_.CONTROLLER() == d_.controller, "mp: controller mismatch");
         require(mp_.RATE_CALCULATOR() == address(d_.rateCalculator), "mp: rate calculator mismatch");
+
+        // The four curve parameters travel to the constructor as bare positional uint256s, which
+        // is exactly the shape a silent transposition slips through. The policy stores what it
+        // validated, so read it back and demand the whole set.
+        IHyperbolicDynamicMP.Parameters memory params_ = mp_.parameters();
+        require(
+            params_.target_utilization == TARGET_UTILIZATION(), "mp: target utilization mismatch"
+        );
+        require(params_.low_ratio == LOW_RATIO(), "mp: low ratio mismatch");
+        require(params_.high_ratio == HIGH_RATIO(), "mp: high ratio mismatch");
+        require(params_.rate_shift == RATE_SHIFT(), "mp: rate shift mismatch");
+
+        // And a fresh market's rate must sit exactly on the policy floor: its calculator has no
+        // measurable window yet, so anything else means the policy is not reading it.
+        require(mp_.target_rate() == MP_MIN_TARGET_RATE, "mp: not flooring on a fresh calculator");
 
         // Borrowing is shut. Stated as an assert so a market that somehow ships open is caught
         // here rather than discovered later.

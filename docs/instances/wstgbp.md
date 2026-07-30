@@ -16,15 +16,18 @@ token.
 | wsgem decimals | 18 | |
 | gem decimals | 18 | |
 | NAV publication cadence | **weekly**, ~6.8 bp/step (~3.54% APR) | |
+| Yield per publication | ~6.8 bp | |
 | Redemption | atomic, full supply, no slippage, at NAV − 25 bp | |
+| Feed key holder | 3-of-5 Safe `0xa73c94969dE90Edb159D29922C42fF24beDFA085` — holds both the poke key and the pip's admin functions (verified on-chain 2026-07-30: `getThreshold() == 3`, five owners, `pip.wards(safe) == 1`) | |
+| Feed pause history | Never paused (as of 2026-07-30) | |
+| Audit | [ProtoTech, 2026-04-29](https://docs.wstgbp.com/audits/2026-04-29-prototech-wstgbp-audit.pdf) | |
 
 Confirmed on-chain at block 25647192: `wsgem.gem()` returns the gem above, both decimals are 18,
 and `navprice()` was `1006710563072740256` (≈ 1.00671 gem per wsgem).
 
 ## What matters about the feed
 
-Three properties drive nearly every design decision in this repo. State them plainly in any risk
-write-up — reviewers will find them anyway.
+Three properties drive nearly every design decision in this repo.
 
 1. **The NAV is a single storage slot behind a single permissioned key.** No market sets it.
 2. **It is published weekly, tracks a central-bank policy rate, and steps rather than accruing.**
@@ -36,7 +39,12 @@ write-up — reviewers will find them anyway.
    nothing.
 
 The feed sits behind an upgradeable proxy, so "unreadable" is as real a state as "paused". Both
-shims treat a revert or a short return as a pause.
+shims treat a revert or a short return as a pause — and cap the gas they forward, so even a
+hostile implementation cannot brick the read path.
+
+**The same quorum holds both feed powers.** The 3-of-5 Safe above is both the publication key
+and the pip's ward, so a publication and a proxy upgrade require the same three signatures. The
+generic docs discuss the two capabilities separately.
 
 ## Parameters
 
@@ -55,8 +63,8 @@ shims treat a revert or a short return as a pause.
 
 Inherited from Curve's sDOLA/crvUSD market — the closest published analogue, and a set Curve's own
 risk process has already accepted. See [../04-parameters.md](../04-parameters.md). The liquidation
-parameters are the ones to argue rather than inherit: they came from a market with different
-collateral and different liquidity.
+parameters should be reviewed rather than inherited unexamined: they came from a market with
+different collateral and different liquidity.
 
 ## Deployed addresses
 
@@ -107,13 +115,11 @@ on its floor through exactly the period during which the borrow cap is zero anyw
   redemption realises 25 bp less than the reported price. That is 25 bp out of the 100 bp
   `liquidation_discount`, leaving 75 bp of real margin. Reporting `burncost` instead would move the
   same 25 bp from the discount into the price — explicit rather than implicit — at the cost of 25 bp
-  of borrowing power for every borrower. The choice was to keep the borrowing power; either way it
-  should be named in a risk review rather than discovered.
+  of borrowing power for every borrower. The choice was to keep the borrowing power.
 - **Redemption is atomic, against the full supply, and slippage-free.** So liquidator depth is not a
-  risk variable: an exit always exists at a known price, however large the position. This is a
-  materially stronger position than a market whose liquidation depends on pool depth, and it is
-  worth stating explicitly in the governance proposal.
+  risk variable: an exit always exists at a known price, however large the position. This differs
+  from a market whose liquidation depends on pool depth.
 - **A downward NAV publication passes through immediately.** By design — see
-  [../07-operations.md](../07-operations.md) — but it is the sharpest edge in the system: it can
-  move loans into liquidation within one block, irreversibly, and the oracle does not guard it.
+  [../07-operations.md](../07-operations.md). It can move loans into liquidation within one
+  block, irreversibly; the oracle does not limit downward moves.
 - **Both tokens are 18 decimals**, which is what lets the oracle carry no scaling term at all.

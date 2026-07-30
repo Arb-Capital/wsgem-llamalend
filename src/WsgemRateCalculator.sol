@@ -63,6 +63,14 @@ contract WsgemRateCalculator is IRateCalculator {
     ///      inert through exactly this period.
     uint256 public constant MIN_INTERVALS = 2;
 
+    /// @notice Upper bound on the gas forwarded to the feed on a read.
+    /// @dev Same defence as on the oracle beside this contract: the pip sits behind an upgradeable
+    ///      proxy, and this contract is called from inside every borrow, repay and liquidation, so
+    ///      a hostile implementation must not be able to burn the transaction's gas or return an
+    ///      enormous payload. A live read costs on the order of ten thousand gas (measured in the
+    ///      fork suite); an implementation that exceeds the cap reads as paused.
+    uint256 public constant PIP_READ_GAS = 250_000;
+
     // --- Immutables --------------------------------------------------------------------------
 
     /// @notice The wsgem whose yield is measured.
@@ -293,11 +301,21 @@ contract WsgemRateCalculator is IRateCalculator {
     ///         signal a pause.
     /// @dev `pip` sits behind an upgradeable proxy, so `read()` reverting is a state to absorb, not
     ///      a reason to revert in turn -- this contract is called from inside every borrow, repay
-    ///      and liquidation.
+    ///      and liquidation. The call is capped at `PIP_READ_GAS` and only the first return word is
+    ///      ever copied, so a gas-burning or payload-bombing implementation is absorbed the same
+    ///      way rather than allowed to out-of-gas the caller.
     function _spot() internal view returns (uint256) {
-        (bool ok_, bytes memory ret_) = address(PIP).staticcall(abi.encodeCall(IPip.read, ()));
-        if (!ok_ || ret_.length < 32) return 0;
-        uint256 nav_ = abi.decode(ret_, (uint256));
+        bytes memory data_ = abi.encodeCall(IPip.read, ());
+        address pip_ = address(PIP);
+        bool ok_;
+        uint256 size_;
+        uint256 nav_;
+        assembly ("memory-safe") {
+            ok_   := staticcall(PIP_READ_GAS, pip_, add(data_, 0x20), mload(data_), 0x00, 0x20)
+            size_ := returndatasize()
+            nav_  := mload(0x00)
+        }
+        if (!ok_ || size_ < 32) return 0;
         return nav_ > type(uint208).max ? uint256(type(uint208).max) : nav_;
     }
 

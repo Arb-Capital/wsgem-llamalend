@@ -11,7 +11,9 @@ contract MockPip {
         NORMAL,
         REVERTING,
         SHORT_RETURN,
-        LONG_RETURN
+        LONG_RETURN,
+        GAS_BOMB,
+        RETURNDATA_BOMB
     }
 
     uint256 public price;
@@ -35,11 +37,26 @@ contract MockPip {
         if (m_ == Mode.NORMAL) return price;
         if (m_ == Mode.REVERTING) revert("pip: unreadable");
 
+        if (m_ == Mode.GAS_BOMB) {
+            // A hostile implementation swap that burns whatever the caller forwards. The shims
+            // must cap the gas they hand over, or this bricks every market read path.
+            uint256 acc_;
+            while (true) acc_ = uint256(keccak256(abi.encode(acc_)));
+        }
+
         uint256 p_ = price;
         if (m_ == Mode.SHORT_RETURN) {
             assembly {
                 mstore(0x00, p_)
                 return(0x00, 0x10) // 16 bytes -- less than one word
+            }
+        }
+        if (m_ == Mode.RETURNDATA_BOMB) {
+            // One mebibyte. Building it costs ~2.2M gas of memory expansion, far past any sane
+            // read cap, so a gas-capped caller sees this fail exactly like a gas bomb.
+            assembly {
+                mstore(0x00, p_)
+                return(0x00, 0x100000)
             }
         }
         assembly {

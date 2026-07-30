@@ -11,13 +11,16 @@ into the test suite.
 
 ## What is here
 
-| File | Bytes | keccak256 of the file's text |
+| File | Bytes | keccak256 of the decoded bytecode |
 |---|---|---|
 | `HyperbolicDynamicMP.initcode.hex` | 6307 | `0x5650941c63a01ef085c4a0b8c477fbc75f1a4c1d985d1b5d55ed5c371c9ec0f9` |
 | `HyperbolicDynamicMP.runtime.hex` | 4306 | `0xb27fc9e78d3b3c616627174768966702e745e501a4c8f42dc480b49c7818952e` |
 
 Both are a single `0x`-prefixed hex string with **no trailing newline** — `vm.parseBytes` rejects
 trailing whitespace. If you regenerate them, keep it that way.
+
+The hashes are of the **decoded bytes**, not of the hex text: reproduce them with
+`cast keccak $(cat <file>)`, which parses the `0x`-string into bytes before hashing.
 
 The initcode is what `script/WsgemLlamalendDeploy.s.sol` deploys, with ABI-encoded constructor
 arguments appended. The runtime file is the expected result, and exists so the equivalence check

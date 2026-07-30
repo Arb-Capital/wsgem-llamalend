@@ -90,13 +90,13 @@ Full address list in [reference/addresses.md](reference/addresses.md).
 ## 6. Run the suites
 
 ```bash
-make test        # 98 unit + invariant tests, no RPC
-make test-fork   # 18 fork tests against live mainnet state
+make test        # 126 unit + invariant tests, no RPC
+make test-fork   # 28 fork tests against live mainnet state
 ```
 
 `make test-fork` hard-fails without a mainnet RPC rather than skipping. That is deliberate: a
-"skip if no RPC" branch turns a missing RPC into a green run, which is how a broken deploy script
-reaches production.
+"skip if no RPC" branch would turn a missing RPC into a green run and let a broken deploy script
+pass unnoticed.
 
 The fork suite is the real gate. It proves, against live state, that the oracle reads the feed
 correctly, that the vendored policy bytecode reproduces Curve's own deployment byte for byte, that
@@ -107,10 +107,10 @@ stays shut until the Configurator opens it.
 ## 7. Read before you start
 
 - [00-architecture.md](00-architecture.md) — what is being deployed and who ends up holding power.
-- [04-parameters.md](04-parameters.md) — every number, and whether you actually agree with it.
-- [06-post-deployment.md](06-post-deployment.md) — **read this first, not last.** The market is
-  inert until a Curve DAO vote lifts its borrow cap, and that governance process is the long pole.
-  Start it before you deploy, not after.
+- [04-parameters.md](04-parameters.md) — every number and its rationale.
+- [06-post-deployment.md](06-post-deployment.md) — read this first, not last. The market is
+  inert until a Curve DAO vote lifts its borrow cap, and that governance process is the slowest
+  step. Start it before you deploy, not after.
 
 ## Checklist
 

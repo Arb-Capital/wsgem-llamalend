@@ -61,6 +61,13 @@ interface ILendFactory {
 
     function admin() external view returns (address);
 
+    /// @notice Where a market's admin share of interest is sent.
+    /// @dev Base form of the Vyper `fee_receiver(_controller = msg.sender)`; resolves to the
+    ///      custom receiver if one is set, else `default_fee_receiver()`.
+    function fee_receiver(address _controller) external view returns (address);
+
+    function default_fee_receiver() external view returns (address);
+
     function paused() external view returns (bool);
 
     function version() external view returns (string memory);

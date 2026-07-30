@@ -27,8 +27,9 @@ abstract contract WstGBPConstants {
     /// @dev 0.25% per day, sized against the observed cadence rather than a rule of thumb: the NAV
     ///      rises about 6.8 basis points per week (~3.5% APR). The ceiling climbs ~1.04 bp/hour, so
     ///      an ordinary weekly step is absorbed in roughly 6.5 hours and the limit is identical to
-    ///      the feed for the other 161 hours -- a time-averaged under-report of about 0.13 bp,
-    ///      against a 100 bp liquidation discount.
+    ///      the feed for the other 161 hours -- a time-averaged under-report of about 0.11 bp
+    ///      (measured: test_aYearOfNormalOperationCostsAboutATenthOfABasisPoint), against a
+    ///      100 bp liquidation discount.
     ///
     ///      What it buys at that price: a mistaken or hostile publication of 2x takes ~9 months to
     ///      propagate and 10x takes ~2.5 years, which is the window in which the borrow cap can be

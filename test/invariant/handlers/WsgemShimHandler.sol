@@ -26,9 +26,6 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     /// @notice Lowest price the oracle ever reported. Must never be zero.
     uint256 public minReportedPrice = type(uint256).max;
 
-    /// @notice Highest rate the calculator ever reported.
-    uint256 public maxReportedRate;
-
     /// @notice Set if `price()` and `price_w()` ever disagreed within a call -- the one thing that
     ///         would make the market unconstructible and then mispriced.
     bool public priceWDiverged;
@@ -64,12 +61,20 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         _observe();
     }
 
+    /// @notice Publish a NAV in the saturation regions the ordinary bound cannot reach: the
+    ///         calculator's uint208 clamp and the oracle's ceiling saturation both live out here.
+    function pokeExtreme(uint256 nav_) public {
+        PIP.poke(bound(nav_, 1e30, type(uint256).max));
+        _observe();
+    }
+
     /// @notice Publish a NAV close to the current one -- the ordinary weekly step.
     function pokeNearby(uint256 seed_) public {
         uint256 cur_ = PIP.price();
         if (cur_ == 0) cur_ = 1e18;
-        uint256 lo_  = cur_ - cur_ / 100;
-        uint256 hi_  = cur_ + cur_ / 100;
+        uint256 step_ = cur_ / 100;
+        uint256 lo_   = cur_ - step_;
+        uint256 hi_   = step_ > type(uint256).max - cur_ ? type(uint256).max : cur_ + step_;
         PIP.poke(bound(seed_, lo_, hi_));
         _observe();
     }
@@ -80,9 +85,10 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         _observe();
     }
 
-    /// @notice Break the feed in one of the ways a proxy upgrade can.
+    /// @notice Break the feed in one of the ways a proxy upgrade can, gas and payload bombs
+    ///         included.
     function breakFeed(uint8 mode_) public {
-        PIP.setMode(MockPip.Mode(bound(mode_, 0, 3)));
+        PIP.setMode(MockPip.Mode(bound(mode_, 0, 5)));
         _observe();
     }
 
@@ -103,7 +109,6 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         CALC.rate_w();
 
         uint256 r_ = CALC.rate();
-        if (r_ > maxReportedRate) maxReportedRate = r_;
 
         // The measurement runs between two stored publications, not against the live feed -- so
         // the growth being claimed is the growth between those two checkpoints. Comparing against
@@ -119,8 +124,13 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     /// @dev Records the properties the invariants assert. Called before every state change so the
     ///      rate-limit check compares two consecutive reported prices with a known elapsed time.
     function _observe() internal {
-        uint256 spot_ = PIP.mode() == MockPip.Mode.NORMAL ? PIP.price() : 0;
-        uint256 p_    = ORACLE.price();
+        // A LONG_RETURN read succeeds -- the shims take the first word -- so the over-report
+        // check must run against it too, not be skipped as if the feed were dark. The bombs and
+        // the short/reverting modes genuinely read as a pause.
+        MockPip.Mode m_ = PIP.mode();
+        bool readable_  = m_ == MockPip.Mode.NORMAL || m_ == MockPip.Mode.LONG_RETURN;
+        uint256 spot_   = readable_ ? PIP.price() : 0;
+        uint256 p_      = ORACLE.price();
 
         if (p_ < minReportedPrice) minReportedPrice = p_;
         if (spot_ != 0 && p_ > spot_) overReported = true;
@@ -132,8 +142,20 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         if (elapsed_ > ORACLE.MAX_ELAPSED()) elapsed_ = ORACLE.MAX_ELAPSED();
 
         if (p_ > lastPrice) {
-            uint256 allowed_ = lastPrice + (lastPrice * ORACLE.MAX_UPSIDE_SPEED() * elapsed_) / 1e18;
-            if (p_ > allowed_) rateLimitBreached = true;
+            // Recomputed with the production contract's own guard structure: once the allowance
+            // arithmetic saturates, any price is admissible and the check has nothing to say --
+            // the dedicated saturation tests pin that region. Everything below saturation is
+            // checked exactly.
+            uint256 rate_ = ORACLE.MAX_UPSIDE_SPEED() * elapsed_;
+            bool saturated_;
+            uint256 growth_;
+            if (rate_ != 0 && lastPrice > type(uint256).max / rate_) {
+                saturated_ = true;
+            } else {
+                growth_ = (lastPrice * rate_) / 1e18;
+                if (growth_ > type(uint256).max - lastPrice) saturated_ = true;
+            }
+            if (!saturated_ && p_ > lastPrice + growth_) rateLimitBreached = true;
         }
 
         lastPrice     = ORACLE.price();

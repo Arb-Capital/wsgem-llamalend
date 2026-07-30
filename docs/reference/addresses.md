@@ -17,7 +17,7 @@ recorded on the instance sheet in [`../instances/`](../instances/), not here.
 | Leverage zap | `0x5D847c892891B503c3483D3Abbc2a23774279b85` | |
 
 The blueprints are read from the factory at creation time, not passed in, so they are informational
-here — but worth recording, because a blueprint change means later markets are not the same code as
+here; recorded because a blueprint change means later markets are not the same code as
 earlier ones.
 
 Confirm before relying on any of it:
@@ -39,7 +39,7 @@ cast call $FACTORY "market_count()(uint256)" --rpc-url $ETH_RPC_URL
 Untested by this repo. The shims are chain-agnostic, but nothing here has been run against
 Optimism — treat a deployment there as new work, not a copy.
 
-## Reference deployments worth comparing against
+## Reference deployments
 
 Curve's own V2 markets. The sDOLA one is the closest analogue to a wsgem market — a yield-bearing
 wrapper against a like-kind asset — and this repo uses it twice: as the source of its starting

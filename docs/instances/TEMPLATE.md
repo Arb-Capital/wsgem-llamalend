@@ -41,7 +41,7 @@ Justify each against [../04-parameters.md](../04-parameters.md) rather than copy
 
 ## Deployed addresses
 
-Fill in as you go. These are also what belongs in the deployment record and the governance
+Fill in as you go. These also go into the deployment record and the governance
 proposal.
 
 ### Oracle — step 1 of [../05-deploy-mainnet.md](../05-deploy-mainnet.md)

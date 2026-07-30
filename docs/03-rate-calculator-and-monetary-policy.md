@@ -88,8 +88,8 @@ it stands.
 
 ### If publications stop
 
-Between publications the reported rate is deliberately flat — that is the whole point. But a feed
-that has stopped should not have its last reading held forever. Once it is overdue by more than
+Between publications the reported rate is deliberately flat. A feed that has stopped, however,
+should not have its last reading held forever. Once it is overdue by more than
 `MAX_PUBLICATION_GAP` (10 days, against a weekly cadence), the denominator starts growing with the
 wall clock and the reported rate decays toward zero.
 
@@ -108,8 +108,11 @@ borrow rate to the policy's ceiling.
 
 The policy is defensive in the same direction: it reads the calculator through
 `raw_call(..., revert_on_failure=False)` and clamps into `[317097920, 47564687975]`, about 1% to
-150% APR. That clamp is a backstop, not this contract's error handling — but it does mean a
-catastrophic NAV movement caps out at 150% APR rather than propagating.
+150% APR. That clamp applies to the base rate (`target_rate()`); the final `rate()` applies the
+utilization curve's ratios and shift on top of it, and the Controller separately caps the rate it
+charges at 300% APY (`MAX_RATE`). The clamp is a backstop, not this contract's error handling —
+but it does mean an extreme NAV movement moves the base rate to at most 150% APR rather than
+propagating.
 
 A paused or unreadable feed is *not* an immediate zero: the ring still holds real, already-published
 history, so the last measurement is held through the grace period and then decays. Zeroing the

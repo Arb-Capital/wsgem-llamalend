@@ -77,4 +77,42 @@ contract WsgemMonetaryPolicyBytecodeTest is Test {
         address mp_ = _deploy(address(0xC0), address(0xCA));
         assertGt(IHyperbolicDynamicMP(mp_).target_apr(), 0);
     }
+
+    function _tryDeploy(uint256 targetUtil_, uint256 low_, uint256 high_, uint256 shift_)
+        internal
+        returns (address mp_)
+    {
+        bytes memory code_ = abi.encodePacked(
+            vm.parseBytes(vm.readFile(INITCODE_PATH)),
+            abi.encode(address(0xC0), address(0xCA), targetUtil_, low_, high_, shift_)
+        );
+        assembly ("memory-safe") {
+            mp_ := create(0, add(code_, 0x20), mload(code_))
+        }
+    }
+
+    /// @dev The four curve parameters travel as bare positional uint256s in the initcode's
+    ///      constructor tail, which is exactly the shape a transposition slips through. The
+    ///      classic one -- LOW_RATIO and HIGH_RATIO swapped -- must be rejected by the
+    ///      constructor itself (`low_ratio < 1e18 < high_ratio`), because an inverted curve would
+    ///      not be obvious from anything a fresh market reports.
+    function test_aSwappedLowAndHighRatioIsRejectedByTheConstructor() public {
+        address mp_ = _tryDeploy(TARGET_UTILIZATION, HIGH_RATIO, LOW_RATIO, RATE_SHIFT);
+        assertEq(mp_, address(0), "an inverted curve must fail to construct");
+    }
+
+    /// @dev And the transpositions the constructor's bounds CANNOT catch -- TARGET_UTILIZATION
+    ///      into LOW_RATIO, say, both of which sit inside each other's legal range -- are caught
+    ///      by readback: the policy stores what it validated, `parameters()` returns it, and the
+    ///      deploy script asserts the whole set against the configured values. This pins the
+    ///      decoding that assertion depends on.
+    function test_theStoredParametersEchoTheConstructorArguments() public {
+        address mp_ = _deploy(address(0xC0), address(0xCA));
+
+        IHyperbolicDynamicMP.Parameters memory p_ = IHyperbolicDynamicMP(mp_).parameters();
+        assertEq(p_.target_utilization, TARGET_UTILIZATION);
+        assertEq(p_.low_ratio, LOW_RATIO);
+        assertEq(p_.high_ratio, HIGH_RATIO);
+        assertEq(p_.rate_shift, RATE_SHIFT);
+    }
 }

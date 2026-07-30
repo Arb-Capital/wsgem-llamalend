@@ -155,6 +155,20 @@ contract WsgemRateMathTest is Test {
         assertGt(o_.price_w(), 0);
     }
 
+    /// @dev The OTHER saturation branch. The test above overflows the multiplication; this one
+    ///      slips past it (one wei-second of rate) and overflows the addition instead: a cached
+    ///      price within `cached/WAD` of the top of uint256. Just as unreachable by the ratchet,
+    ///      just as required not to revert.
+    function test_anAdditionOverflowAlsoSaturatesRatherThanReverting() public {
+        pip.poke(type(uint256).max - 1e58);
+        WsgemLlamalendOracle o_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), 1);
+
+        skip(1);
+        assertEq(o_.priceCeiling(), type(uint256).max, "the sum must saturate, not revert");
+        assertGt(o_.price(), 0);
+        assertGt(o_.price_w(), 0);
+    }
+
     /// @dev Dust. Below roughly 58 wei a full week of allowance rounds to nothing, so the ceiling
     ///      stops growing. Documented rather than fixed: it can only be reached if the NAV has
     ///      already collapsed to 5.8e-17 of a gem, and being stuck low is the safe direction.

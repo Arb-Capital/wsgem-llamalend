@@ -63,14 +63,24 @@ contract WsgemLlamalendOracle is IPriceOracle {
     /// @notice Upper bound on the elapsed time credited to the rate limit in one step.
     /// @dev Without this, a market left untouched for months would accumulate enough allowance for
     ///      the next `price_w` to jump the reported price arbitrarily far in a single block --
-    ///      which is precisely what the rate limit exists to prevent. Seven days is comfortably
-    ///      more than a wsgem's publication interval, so it never binds in ordinary operation.
+    ///      which is precisely what the rate limit exists to prevent. Seven days covers a wsgem's
+    ///      publication interval, so it binds only when nothing has driven `price_w` for a full
+    ///      publication cycle -- and then in the safe direction, crediting less allowance.
     uint256 public constant MAX_ELAPSED = 7 days;
 
     /// @notice Hard ceiling on the constructor's speed argument: 100% per hour.
     /// @dev A cap looser than this is not a rate limit in any useful sense. It also keeps
     ///      `MAX_UPSIDE_SPEED * MAX_ELAPSED` far away from anything that could overflow.
     uint256 public constant MAX_UPSIDE_SPEED_LIMIT = WAD / 1 hours;
+
+    /// @notice Upper bound on the gas forwarded to the feed on a read.
+    /// @dev The pip sits behind an upgradeable proxy, so a hostile or broken implementation could
+    ///      otherwise burn the transaction's whole gas allowance -- the one way `price()` could
+    ///      still fail after a plain revert has been folded into a freeze. A live read costs on
+    ///      the order of ten thousand gas (measured in the fork suite), so this is more than an
+    ///      order of magnitude of headroom for a legitimate proxy upgrade; an implementation that
+    ///      exceeds it reads as paused, which is the freeze path and alarmed by `frozen()`.
+    uint256 public constant PIP_READ_GAS = 250_000;
 
     // --- Immutables --------------------------------------------------------------------------
 
@@ -85,10 +95,11 @@ contract WsgemLlamalendOracle is IPriceOracle {
     IPip public immutable PIP;
 
     /// @notice Maximum relative increase in the reported price, per second, scaled by 1e18.
-    /// @dev At 1e16/86400 (1% per day), a week of yield at 5% APR -- about 9.6 basis points --
-    ///      is absorbed in roughly two hours, while a hostile 10x poke would take on the order of
-    ///      a year to propagate. That asymmetry is the whole point: the limit is invisible in
-    ///      normal operation and an effective stop otherwise.
+    /// @dev At 0.0025e18/86400 (0.25% per day, the configured wstGBP value), a week of yield at
+    ///      3.5% APR -- about 6.8 basis points -- is absorbed in roughly six and a half hours,
+    ///      while a hostile 10x poke would take about two and a half years to propagate. That
+    ///      asymmetry is the whole point: the limit is invisible in normal operation and an
+    ///      effective stop otherwise.
     uint256 public immutable MAX_UPSIDE_SPEED;
 
     // --- Storage -----------------------------------------------------------------------------
@@ -203,11 +214,23 @@ contract WsgemLlamalendOracle is IPriceOracle {
     /// @notice The feed reading, with an unreadable feed folded into the same zero the feed itself
     ///         uses to signal a pause.
     /// @dev `pip` sits behind an upgradeable proxy, so `read()` reverting is a real state and not
-    ///      a reason for this contract to revert in turn. A short return is treated the same way.
+    ///      a reason for this contract to revert in turn; a short return is treated the same way.
+    ///      The call is capped at `PIP_READ_GAS` and only the first return word is ever copied, so
+    ///      an implementation that burns gas or returns an enormous payload is folded into the
+    ///      same freeze rather than allowed to break the market's read path with an out-of-gas.
     function _spot() internal view returns (uint256) {
-        (bool ok_, bytes memory ret_) = address(PIP).staticcall(abi.encodeCall(IPip.read, ()));
-        if (!ok_ || ret_.length < 32) return 0;
-        return abi.decode(ret_, (uint256));
+        bytes memory data_ = abi.encodeCall(IPip.read, ());
+        address pip_ = address(PIP);
+        bool ok_;
+        uint256 size_;
+        uint256 nav_;
+        assembly ("memory-safe") {
+            ok_   := staticcall(PIP_READ_GAS, pip_, add(data_, 0x20), mload(data_), 0x00, 0x20)
+            size_ := returndatasize()
+            nav_  := mload(0x00)
+        }
+        if (!ok_ || size_ < 32) return 0;
+        return nav_;
     }
 
     /// @notice The reported price for a given feed reading.

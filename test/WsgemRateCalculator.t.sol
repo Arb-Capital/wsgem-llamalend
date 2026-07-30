@@ -15,8 +15,9 @@ contract WsgemRateCalculatorTest is Test {
     /// @dev The observed cadence: ~6.8 bp per week, about 3.54% APR.
     uint256 internal constant STEP_BPS = 68; // in hundredths of a bp, i.e. 6.8bp
 
-    /// @dev Curve's HyperbolicDynamicMP clamps whatever this contract reports into this range, so
-    ///      a value outside it is never what the market actually charges.
+    /// @dev Curve's HyperbolicDynamicMP clamps whatever this contract reports into this range
+    ///      before using it as the BASE rate; the final rate applies the utilization curve on
+    ///      top, and the Controller caps what it charges at 300% APY.
     uint256 internal constant MP_MIN_RATE = 317_097_920;
     uint256 internal constant MP_MAX_RATE = 47_564_687_975;
 
@@ -67,6 +68,17 @@ contract WsgemRateCalculatorTest is Test {
         pip.poke(0);
         vm.expectRevert(WsgemRateCalculator.OraclePaused.selector);
         new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+    }
+
+    function test_constructorRejectsAZeroWsgem() public {
+        vm.expectRevert(WsgemRateCalculator.ZeroAddress.selector);
+        new WsgemRateCalculator(IWsgem(address(0)), INTERVALS, GAP);
+    }
+
+    function test_constructorRejectsAWsgemWithAZeroPip() public {
+        MockWsgem noPip_ = new MockWsgem(address(gem), address(0), 18);
+        vm.expectRevert(WsgemRateCalculator.ZeroAddress.selector);
+        new WsgemRateCalculator(IWsgem(address(noPip_)), INTERVALS, GAP);
     }
 
     function test_constructorRejectsIntervalsOutOfRange() public {
@@ -258,6 +270,133 @@ contract WsgemRateCalculatorTest is Test {
         assertEq(calc.rate(), 0);
     }
 
+    function test_theRateResumesOnceAFallRollsOutOfTheWindow() public {
+        _runWeeks(8, 354);
+
+        // One bad publication, down 50 bp -- more than the window's ~27 bp of accumulated yield,
+        // so the endpoints see a net fall.
+        skip(7 days);
+        pip.poke((pip.price() * (10_000 - 50)) / 10_000);
+        calc.rate_w();
+        assertEq(calc.rate(), 0, "a window containing a net fall pays no yield");
+
+        // Two good publications later the fall is still inside the window.
+        _runWeeks(2, 354);
+        assertEq(calc.rate(), 0, "still inside the window, still a net fall");
+
+        // Four publications after the fall, it is the far endpoint's neighbour and out of the
+        // measurement. The rate must resume at the cadence, not stay stuck.
+        _runWeeks(2, 354);
+        assertApproxEqRel(_toApr(calc.rate()), 0.0354e18, 0.05e18, "the rate must recover");
+    }
+
+    /// @dev The endpoint formula sees only net growth: a dip and recovery inside one window is
+    ///      measured as the difference between the two endpoints, nothing more.
+    function test_aDipAndRecoveryInsideTheWindowMeasureTheirNet() public {
+        _runWeeks(8, 354);
+
+        skip(7 days);
+        uint256 dipped_ = (pip.price() * (10_000 - 20)) / 10_000;
+        pip.poke(dipped_);
+        calc.rate_w();
+
+        skip(7 days);
+        pip.poke((dipped_ * (10_000 + 40)) / 10_000);
+        calc.rate_w();
+
+        (uint256 oldNav_,) = calc.oldestCheckpoint();
+        (uint256 newNav_,) = calc.newestCheckpoint();
+        assertGt(calc.rate(), 0);
+        assertEq(
+            calc.rate(),
+            (((newNav_ - oldNav_) * WAD) / oldNav_) / calc.measuredSpan(),
+            "only the endpoints enter the measurement"
+        );
+    }
+
+    /// @dev Only the feed key can publish this fast, so this is inside the trusted-feed model --
+    ///      but the shape is worth pinning: a collapsed span reads as an absurd per-second rate,
+    ///      and the bound on what the market actually charges is Curve's policy clamp, not this
+    ///      contract.
+    function test_rapidRepublicationCollapsesTheSpanAndSpikesToTheClamp() public {
+        _runWeeks(8, 354);
+
+        for (uint256 i; i < 4; ++i) {
+            skip(1 minutes);
+            pip.poke(pip.price() + (pip.price() * 10) / 10_000); // +10 bp per minute
+            calc.rate_w();
+        }
+
+        uint256 r_ = calc.rate();
+        assertGt(_toApr(r_), 100e18, "a collapsed span reads as an absurd APR");
+        assertGt(r_, MP_MAX_RATE, "past the base-rate clamp: the policy and Controller caps bound what is charged");
+    }
+
+    function test_anAlternatingFeedMeasuresItsNetWhichIsZero() public {
+        _runWeeks(8, 354);
+        uint256 nav_ = pip.price();
+
+        // A period-two oscillation across an even window: the endpoints are equal, so no yield.
+        for (uint256 i; i < 6; ++i) {
+            skip(1 hours);
+            pip.poke(i % 2 == 0 ? nav_ + 1e15 : nav_);
+            calc.rate_w();
+        }
+        assertEq(calc.rate(), 0, "an oscillation has no net growth across an even window");
+    }
+
+    /// @dev The constructor's seed checkpoint is a mid-cycle observation: its NAV belongs to the
+    ///      previous publication but its timestamp is the deploy block, so until it leaves the
+    ///      window the measured span is short by up to one publication interval and the rate is
+    ///      overstated by up to INTERVALS/(INTERVALS-1). That is accepted -- a new market's
+    ///      borrow cap is zero through exactly this period -- but pinned here so it stays a
+    ///      choice rather than a surprise.
+    function test_theDeploySeedOverstatesEarlyAndCorrectsWhenItLeavesTheWindow() public {
+        WsgemRateCalculator fresh_ = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+
+        // The next publication lands an hour after deploy; weekly thereafter.
+        skip(1 hours);
+        for (uint256 i; i < 4; ++i) {
+            uint256 nav_ = pip.price();
+            pip.poke(nav_ + (nav_ * 354) / 10_000 / 52);
+            fresh_.rate_w();
+            if (i < 3) skip(7 days);
+        }
+
+        // Four publications of growth measured across three weeks and an hour: ~4/3 overstated.
+        assertApproxEqRel(_toApr(fresh_.rate()), (0.0354e18 * 4) / 3, 0.05e18);
+
+        // The fifth publication pushes the seed out of the window and the measurement corrects.
+        skip(7 days);
+        uint256 n_ = pip.price();
+        pip.poke(n_ + (n_ * 354) / 10_000 / 52);
+        fresh_.rate_w();
+        assertApproxEqRel(_toApr(fresh_.rate()), 0.0354e18, 0.05e18);
+    }
+
+    function test_aGasBombFeedIsCappedAndAbsorbed() public {
+        _runWeeks(8, 354);
+        uint256 rate_  = calc.rate();
+        uint256 count_ = calc.checkpointCount();
+
+        pip.setMode(MockPip.Mode.GAS_BOMB);
+        uint256 g0_ = gasleft();
+        calc.rate_w();
+        assertLt(g0_ - gasleft(), 300_000, "the read must never forward more than PIP_READ_GAS");
+        assertEq(calc.rate(), rate_, "a burning feed holds the measurement, like a pause");
+        assertEq(calc.checkpointCount(), count_);
+    }
+
+    function test_aReturndataBombFeedIsAbsorbed() public {
+        _runWeeks(8, 354);
+        uint256 count_ = calc.checkpointCount();
+
+        pip.setMode(MockPip.Mode.RETURNDATA_BOMB);
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), count_, "an oversized payload must never be recorded");
+        assertGt(calc.rate(), 0);
+    }
+
     function test_aPausedFeedIsNotCheckpointed() public {
         _runWeeks(8, 354);
         (uint256 navBefore_,) = calc.newestCheckpoint();
@@ -316,7 +455,102 @@ contract WsgemRateCalculatorTest is Test {
 
     function test_aprViewMatchesTheAnnualisedRate() public {
         _runWeeks(8, 354);
-        assertEq(calc.apr(), calc.rate() * 365 days);
+
+        // Annualised by hand from the raw endpoints rather than from `rate()`, and checked
+        // against the configured cadence, so this cannot degrade into the implementation
+        // restated.
+        (uint256 oldNav_,) = calc.oldestCheckpoint();
+        (uint256 newNav_,) = calc.newestCheckpoint();
+        // The divisions come first deliberately: this mirrors the production rounding order, so
+        // the equality below is exact rather than approximate.
+        // forge-lint: disable-next-line(divide-before-multiply)
+        uint256 expected_ = ((((newNav_ - oldNav_) * WAD) / oldNav_) / calc.measuredSpan()) * 365 days;
+
+        assertEq(calc.apr(), expected_);
+        assertApproxEqRel(calc.apr(), 0.0354e18, 0.02e18, "and it must sit at the fed cadence");
+    }
+
+    function test_aprSaturatesRatherThanReverting() public {
+        // One wei of old NAV against the largest delta the overflow guard admits, over one-second
+        // spans: the per-second rate is astronomical and annualising it overflows. The view must
+        // saturate -- a convenience view that can revert is a view that breaks a block explorer.
+        pip.poke(1);
+        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP);
+
+        skip(1);
+        pip.poke(2);
+        c_.rate_w();
+
+        skip(1);
+        pip.poke(type(uint256).max / WAD);
+        c_.rate_w();
+
+        assertGt(c_.rate(), 0, "the rate itself is representable");
+        assertEq(c_.apr(), type(uint256).max, "its annualisation is not, and must saturate");
+    }
+
+    /// @dev Exercises the production overflow guard (`delta_ > type(uint256).max / WAD`) and the
+    ///      saturating uint208 store in one scenario: the reachable path to an absurd delta is a
+    ///      saturated NAV against a tiny old one.
+    function test_anAbsurdNavDeltaReadsAsZeroRatherThanOverflowing() public {
+        pip.poke(1);
+        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP);
+
+        skip(1 days);
+        pip.poke(2);
+        c_.rate_w();
+
+        skip(1 days);
+        pip.poke(type(uint256).max);
+        c_.rate_w();
+
+        (uint256 newNav_,) = c_.newestCheckpoint();
+        assertEq(newNav_, uint256(type(uint208).max), "a monstrous NAV saturates, never wraps");
+        assertEq(c_.rate(), 0, "a delta past the overflow guard is garbage, not yield");
+        assertEq(c_.apr(), 0);
+    }
+
+    // --- Views ---------------------------------------------------------------------------------
+
+    function test_spotNavMirrorsTheFeedAndItsFailureStates() public {
+        assertEq(calc.spotNav(), NAV0);
+
+        pip.poke(type(uint256).max);
+        assertEq(calc.spotNav(), uint256(type(uint208).max), "saturated, never wrapped");
+
+        pip.poke(0);
+        assertEq(calc.spotNav(), 0);
+
+        pip.setMode(MockPip.Mode.REVERTING);
+        assertEq(calc.spotNav(), 0);
+    }
+
+    // --- Events ----------------------------------------------------------------------------------
+
+    event Checkpointed(uint256 indexed nav, uint256 indexed slot);
+
+    function test_checkpointedEmitsTheSlotItWroteThroughAWrap() public {
+        // Nine publications walk the head through every slot and back past zero: slot 0 was the
+        // constructor's, so publication i lands in slot i mod 8.
+        for (uint256 i = 1; i <= 9; ++i) {
+            skip(7 days);
+            uint256 nav_ = NAV0 + i * 1e14;
+            pip.poke(nav_);
+            vm.expectEmit(true, true, false, true, address(calc));
+            emit Checkpointed(nav_, i % 8);
+            calc.rate_w();
+        }
+    }
+
+    // --- Permissionlessness ------------------------------------------------------------------------
+
+    function test_rateWIsCallableByAnyArbitraryAddress() public {
+        skip(7 days);
+        pip.poke(NAV0 + 1e14);
+
+        vm.prank(address(0xBEEF));
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), 2, "rate_w carries no caller privilege of any kind");
     }
 
     // --- Ownerlessness -------------------------------------------------------------------------
@@ -339,7 +573,19 @@ contract WsgemRateCalculatorTest is Test {
     // --- Fuzz ----------------------------------------------------------------------------------
 
     function testFuzz_neverRevertsOnAnyNav(uint256 nav_, uint32 dt_) public {
+        // Seed a measurable window first. With fewer than MIN_INTERVALS publications every path
+        // exits before the arithmetic, and the fuzz would prove nothing about the ring lookup,
+        // the delta, the overflow guard or the annualisation.
+        skip(7 days);
+        pip.poke(NAV0 + 1e14);
+        calc.rate_w();
+        skip(7 days);
+        pip.poke(NAV0 + 2e14);
+        calc.rate_w();
+
         pip.poke(nav_);
+        skip(dt_);
+        calc.rate_w(); // records nav_ (saturated) so the measurement runs over it
         skip(dt_);
         calc.rate();
         calc.rate_w();

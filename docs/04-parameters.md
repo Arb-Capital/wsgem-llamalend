@@ -38,8 +38,7 @@ first.
 **Where these come from.** Curve's sDOLA/crvUSD market — market 0 on the V2 mainnet factory — uses
 exactly this set. It is the closest published analogue: a yield-bearing wrapper against a like-kind
 asset, where the two prices track each other and the ratio drifts slowly in one direction.
-Starting from a set Curve's own risk process has already accepted is a better default than
-inventing one, and it makes the deployment easy to argue for in a governance forum.
+The set has already been accepted by Curve's risk process for a comparable market.
 
 **`A = 285` in words.** Bands are narrow, so soft liquidation converts collateral in small
 increments and a borrower's loss during a slow drift is small. Narrow bands are appropriate
@@ -53,11 +52,10 @@ at zero regardless of this value. See [06-post-deployment.md](06-post-deployment
 full supply, and slippage-free at the redemption bid — so a liquidator always has an exit at a known
 price, however large the position. The requirement on `liquidation_discount` is therefore just that
 it clears the redemption spread (25 bp for the first instance) with margin, which 100 bp does four
-times over. That is a materially stronger position than a market whose liquidation depends on pool
-depth.
+times over. This differs from a market whose liquidation depends on pool depth.
 
-**But still review before broadcast.** These came from a market with different collateral and a
-different underlying. The one thing to check deliberately is the interaction between the exit
+**Still review before broadcast.** These came from a market with different collateral and a
+different underlying. Check the interaction between the exit
 spread, the AMM `fee` and the band structure: LLAMMA's soft liquidation depends on arbitrageurs
 trading against the AMM, and they face the same exit spread, so their edge has to clear it.
 
@@ -107,10 +105,10 @@ one. Without the limit that number is live in the AMM the next block and the vau
 borrowable against fictitious collateral. With it, you get an alarm and roughly a day of slack to
 set the borrow cap to zero, having lost 0.25%.
 
-Worth being precise about the limits of that: in a **key-compromise** scenario the wrapper itself is
+The limits of that: in a **key-compromise** scenario the wrapper itself is
 already drainable, because redemption is atomic and against the full supply, so an attacker
 publishing a high NAV redeems directly at the inflated bid. The rate limit protects the lending
-market, not the asset. It is worth keeping because Llamalend's lenders are a different set of people
+market, not the asset. It is kept because Llamalend's lenders are a different set of people
 holding a different asset — and because it costs 0.11 bp.
 
 **It guards only the upside.** A mistaken publication *downward* reaches the market in one block and

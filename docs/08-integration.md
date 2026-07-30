@@ -31,12 +31,21 @@ Three things that are not obvious:
 minted and not in `totalSupply`, so a fresh vault does **not** start at a 1:1 asset-to-share ratio.
 Use `convertToShares` / `convertToAssets`; never assume a ratio.
 
-**Deposits are capped.** `max_supply` is DAO-configurable — zero disables deposits, `max(uint256)`
-is unlimited. Check `maxDeposit()` / `maxMint()` before depositing rather than reverting.
+**Deposits are capped.** `maxSupply()` is admin-configurable (via the vault's `set_max_supply`) —
+zero disables deposits, `max(uint256)` is unlimited. Check `maxDeposit()` / `maxMint()` before
+depositing rather than reverting.
 
 **Withdrawals are bounded by idle liquidity.** Assets currently lent out cannot be withdrawn until
 repaid. `maxWithdraw` / `maxRedeem` already account for this, so use them rather than
 `convertToAssets(balanceOf(user))`.
+
+**But not by the dust rule.** The vault refuses any withdrawal that would leave it holding more
+than zero but fewer than `MIN_ASSETS` (10000) wei — and `maxWithdraw` does *not* account for
+that. A sole depositor can find the full `maxWithdraw` unwithdrawable, because the virtual
+shares' accrued interest makes an exact empty impossible. When `maxWithdraw()` is at least
+`MIN_ASSETS`, withdrawing `maxWithdraw() - MIN_ASSETS` satisfies the rule (the vault retains at
+least the floor); below that, guard the subtraction and withdraw nothing. The fork suite pins
+this edge.
 
 Yield accrues passively through a rising `pricePerShare`. There is nothing to claim.
 
@@ -108,7 +117,7 @@ The base rate follows the wsgem's realised yield across the last four publicatio
 constant between them. A `target_rate()` of exactly `317097920` means the floor — expected before
 the calculator has recorded two publications.
 
-## Things worth telling your users
+## Things to tell your users
 
 - The collateral's price comes from a weekly-published NAV controlled by a permissioned key, not
   from a market. Upward moves are rate-limited; downward moves are not.

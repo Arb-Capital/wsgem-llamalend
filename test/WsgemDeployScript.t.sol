@@ -125,14 +125,31 @@ contract WsgemDeployScriptTest is Test {
 
     /// @dev The oracle script and the market script carry the same constants through separate
     ///      inheritance chains. If they ever disagree, the market would be created against an
-    ///      oracle configured differently from the one that was deployed and observed.
+    ///      oracle configured differently from the one that was deployed and observed. Every
+    ///      getter in the config is compared -- including the ones the oracle script itself never
+    ///      reads -- because "the tripwire covers less than it advertises" is exactly how drift
+    ///      starts.
     function test_theOracleAndMarketScriptsAgree() public view {
+        assertEq(oracleScript.CHAIN_ID(), marketScript.CHAIN_ID());
+        assertEq(oracleScript.FACTORY(), marketScript.FACTORY());
+        assertEq(oracleScript.CONFIGURATOR(), marketScript.CONFIGURATOR());
         assertEq(oracleScript.WSGEM(), marketScript.WSGEM());
         assertEq(oracleScript.GEM(), marketScript.GEM());
         assertEq(oracleScript.MAX_UPSIDE_SPEED(), marketScript.MAX_UPSIDE_SPEED());
         assertEq(oracleScript.RATE_INTERVALS(), marketScript.RATE_INTERVALS());
         assertEq(oracleScript.MAX_PUBLICATION_GAP(), marketScript.MAX_PUBLICATION_GAP());
-        assertEq(oracleScript.FACTORY(), marketScript.FACTORY());
-        assertEq(oracleScript.CONFIGURATOR(), marketScript.CONFIGURATOR());
+        assertEq(oracleScript.A(), marketScript.A());
+        assertEq(oracleScript.FEE(), marketScript.FEE());
+        assertEq(oracleScript.LOAN_DISCOUNT(), marketScript.LOAN_DISCOUNT());
+        assertEq(oracleScript.LIQUIDATION_DISCOUNT(), marketScript.LIQUIDATION_DISCOUNT());
+        assertEq(oracleScript.SUPPLY_LIMIT(), marketScript.SUPPLY_LIMIT());
+        assertEq(oracleScript.TARGET_UTILIZATION(), marketScript.TARGET_UTILIZATION());
+        assertEq(oracleScript.LOW_RATIO(), marketScript.LOW_RATIO());
+        assertEq(oracleScript.HIGH_RATIO(), marketScript.HIGH_RATIO());
+        assertEq(oracleScript.RATE_SHIFT(), marketScript.RATE_SHIFT());
+    }
+
+    function test_theConfiguredChainIsMainnet() public view {
+        assertEq(marketScript.CHAIN_ID(), 1, "every address in the config is a mainnet address");
     }
 }

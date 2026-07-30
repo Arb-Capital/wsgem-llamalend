@@ -52,7 +52,12 @@ The feed signals a pause by publishing zero. Zero must never reach Llamalend: th
 it at creation, and an AMM that sees a zero mid-market prices every position to nothing.
 
 The shim returns the last good price instead. A reverting or short-returning feed — the same
-failure with a different shape after a proxy upgrade — is folded into the same path.
+failure with a different shape after a proxy upgrade — is folded into the same path. So is a feed
+that tries to burn gas or return an oversized payload: the read forwards at most `PIP_READ_GAS`
+(250k, more than an order of magnitude above the live feed's measured cost) and copies exactly one
+word back, so even a hostile proxy implementation cannot make `price()` revert with an
+out-of-gas. An implementation that legitimately outgrows the cap reads as a pause, which
+`frozen()` alarms.
 
 **Why freeze rather than revert.** Reverting propagates into every AMM read, which means no
 repayment and no liquidation for as long as the pause lasts, while bad debt accrues unliquidated.
@@ -94,7 +99,7 @@ and for the DAO to repoint the market's oracle if the move is not genuine.
 
 ### What the limit is, and is not, for
 
-Worth stating precisely, because two plausible rationales do not apply here.
+Two plausible rationales do not apply here.
 
 **Not frontrunning protection.** Redemption through the wrapper costs 25 bp, which dominates a
 6.8 bp weekly step. There is nothing to gain by racing a publication.
@@ -110,13 +115,13 @@ off-chain — and those produce a 100× error, not a 3 bp one. Without the limit
 the AMM the next block. With it, extraction is capped at 0.25%/day, which is the window in which the
 DAO can set the borrow cap to zero.
 
-Its limits are worth being equally precise about. In a **key-compromise** scenario the wrapper is
-already gone: redemption is atomic and against the full supply, so an attacker publishing a high NAV
+The limits: in a **key-compromise** scenario the limit does not protect the wrapper itself,
+because redemption is atomic and against the full supply — an attacker publishing a high NAV
 redeems directly at the inflated bid, which is faster and larger than borrowing on Llamalend. The
-limit protects the lending market, not the asset. It earns its place because Llamalend's lenders are
-a different set of people holding a different asset, and because it costs 0.11 bp.
+limit protects the lending market, not the asset. It is kept because Llamalend's lenders are a
+different set of people holding a different asset, and because it costs 0.11 bp.
 
-And it is **only half a guard**: a mistaken publication *downward* passes straight through and
+**The limit applies only upward**: a mistaken publication *downward* passes straight through and
 liquidates positions irreversibly. See hazard 3 below for why that is nonetheless the right
 default.
 
@@ -135,14 +140,14 @@ caller polling four times a day rather than a lazy market.
 ### 3. A fall must not be hidden
 
 Downward moves pass through immediately and reset the ceiling to the new lower level.
-Under-valuing collateral is recoverable; over-valuing it behind a stale high price is how bad debt
-is made.
+Under-valuing collateral is recoverable; over-valuing it behind a stale high price creates bad
+debt.
 
 There is also no independent price to appeal to. Redemption through the wrapper is at the NAV less
 the spread, so when the NAV falls the collateral genuinely *is* worth less — holding a stale high
 price would be valuing it above what anyone can realise for it. The cost of that choice is that a
-mistaken downward publication liquidates positions in one block, irreversibly, and nothing in this
-shim stops it. That is the sharpest edge in the system and belongs in any risk write-up.
+mistaken downward publication liquidates positions in one block, irreversibly; nothing in this
+shim prevents that.
 
 ## Why the linear cap rather than an EMA
 
@@ -151,11 +156,11 @@ average. This shim uses the linear speed cap from Curve's earlier
 `price_oracles/OracleVaultWrapper.vy` instead. Two reasons, both specific to a wsgem:
 
 - **The NAV steps, it does not accrue.** Against a weekly step what you want is a stated bound —
-  "at most 1% per day" — that can be checked against a published cadence. An EMA gives an
-  asymptote, which is the right shape for something accruing continuously and the wrong shape for
-  something that jumps.
+  "at most 0.25% per day", the configured value — that can be checked against a published cadence.
+  An EMA gives an asymptote, which is the right shape for something accruing continuously and the
+  wrong shape for something that jumps.
 - **It is exact integer arithmetic.** No `expWad`, no magic constants, nothing transcendental to
-  audit in a contract whose whole job is to be boring.
+  audit.
 
 The behaviour contract — dampen up, pass down, never report zero — is identical either way. The
 deviation is called out in the contract's own natspec so it reads as a decision rather than an
@@ -172,7 +177,7 @@ oversight.
 | `cachedPrice` / `cachedTimestamp` | The checkpoint the limit is measured from. |
 
 A persistent gap between `price()` and `spotPrice()` means the rate limit is binding. In ordinary
-operation it should not be, so that gap is the alarm worth wiring up.
+operation it should not be, so that gap is the alarm to wire up.
 
 ## Adding a new wsgem
 
