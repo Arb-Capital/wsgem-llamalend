@@ -14,22 +14,60 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
 
+      # Pinned: the action defaults to `stable`, which moves under us. v1.7.1 is the version this
+      # project's tests were verified against.
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
 
       - name: Show Forge version
         run: forge --version
 
-      - name: Run Forge fmt
-        run: forge fmt --check
+      # `forge fmt --check` is deliberately absent: the hand-aligned declaration columns are
+      # house style, and forge fmt destroys them.
 
       - name: Run Forge build
         run: forge build --sizes
 
+      # Unit and invariant tests need no RPC and no network.
       - name: Run Forge tests
-        run: forge test -vvv
+        run: forge test --no-match-path "test/fork/*" -vvv
+
+  fork:
+    name: Mainnet fork tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ETH_FORK_BLOCK: "25647000"
+      # The `secrets` context is not available in step-level `if:`, so surface it through `env`
+      # here and condition on that instead.
+      ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
+
+      # Pinning the fork block makes this cache reusable across runs.
+      - name: Cache RPC responses
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-${{ env.ETH_FORK_BLOCK }}
+
+      # Fork tests hard-fail without a mainnet RPC rather than silently passing, so this step is
+      # skipped where the secret is unavailable (forks) instead of being made to pass hollowly.
+      - name: Run fork tests
+        if: env.ETH_RPC_URL != ''
+        run: ./scripts/forge_test_fork.sh

@@ -11,10 +11,21 @@ out/
 /broadcast/*/31337/
 /broadcast/**/dry-run/
 
-# Docs
-docs/
+# Docs are a deliverable in this repo, not build output. `forge doc` output only.
+docs/book/
+
+# Coverage
+lcov.info
 
 # Dotenv file
 .env
 .env.*
 !.env.example
+
+# Key material. Deploys sign from a keystore at a filesystem path (see .env.example); if one is
+# ever kept inside the repo it must not become committable.
+*.key
+*.pem
+keystore/
+keystore*.json
+UTC--*

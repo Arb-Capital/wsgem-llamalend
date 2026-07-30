@@ -1,6 +1,43 @@
 [profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
+src               = "src"
+out               = "out"
+libs              = ["lib"]
+build_info        = true
+sizes             = true
+optimizer         = true
+optimizer_runs    = 21_000
+solc_version      = "0.8.34"
+# The fork suite calls into a live wsgem compiled for a post-Paris target. evm_version is global
+# to the EVM, so under `paris` every one of those calls fails with NotActivated.
+evm_version       = "cancun"
+gas_limit         = "18446744073709551615" # u64::MAX
+
+# The deploy script reads the vendored monetary-policy initcode from disk. Read-only, one
+# directory, so a script cannot be talked into reading anything else in the tree.
+fs_permissions    = [{ access = "read", path = "./script/bytecode" }]
+
+[profile.default.fuzz]
+runs              = 256
+max_test_rejects  = 65536
+
+# `fail_on_revert = true` is load-bearing: the invariant handlers predict every outcome and
+# swallow expected reverts through low-level calls, so any UNpredicted revert (including a
+# panic) must fail the run rather than be silently discarded by the fuzzer.
+[profile.default.invariant]
+runs              = 64
+depth             = 128
+fail_on_revert    = true
+shrink_run_limit  = 5000
+show_metrics      = true
+
+# Deeper soak for pre-release: FOUNDRY_PROFILE=intense forge test --match-path "test/invariant/*"
+[profile.intense.invariant]
+runs              = 512
+depth             = 256
+fail_on_revert    = true
+shrink_run_limit  = 5000
+
+[rpc_endpoints]
+mainnet           = "${ETH_RPC_URL}"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

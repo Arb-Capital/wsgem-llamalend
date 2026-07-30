@@ -1,0 +1,127 @@
+# 6 — Post-deployment
+
+A created market is not an open market. Everything in
+[05-deploy-mainnet.md](05-deploy-mainnet.md) is permissionless and produces a market with
+`borrow_cap == 0`: lenders can deposit, nobody can borrow, and nothing in this repo can change
+that.
+
+Only the Curve DAO can. Start the governance conversation before you deploy — it is the long pole,
+and it is measured in weeks.
+
+## Step 1 — Pre-vote verification
+
+Curve reviewers will check these; check them first.
+
+```bash
+ID=$(cast call $FACTORY "vaults_index(address)(uint256)" $VAULT --rpc-url $ETH_RPC_URL)
+cast call $FACTORY "markets(uint256)" $ID --rpc-url $ETH_RPC_URL
+```
+
+| Claim | How it is checked |
+|---|---|
+| The triplet is the factory's own | `markets(id)` returns your three addresses |
+| Oracle is sane | `price()` equals live NAV; `price()` == `price_w()`; `frozen()` false |
+| Oracle is ownerless | Verified source; no owner, ward or setter |
+| Policy is Curve's own code | Runtime bytecode identical to Curve's live sDOLA policy — [PROVENANCE.md](../script/bytecode/PROVENANCE.md) |
+| Policy is bound to this market | `MP.CONTROLLER()` == this controller |
+| Rate calculator is ownerless | Verified source |
+| Parameters are defensible | [04-parameters.md](04-parameters.md) |
+| Fee receiver | `factory.fee_receiver(controller)` |
+
+## Step 2 — The vote
+
+The vote must call the Configurator, from the factory's admin.
+
+```
+Configurator: 0x6065858d0eF0AA240DFdf6f1A0B2ae34B41f49bC
+
+  set_borrow_cap(controller, <cap in gem units, 18 decimals>)
+  set_admin_percentage(controller, <WAD share of interest to the DAO>)
+```
+
+`set_admin_percentage` is optional but conventional — Curve used `1e17` (10%) for its own reference
+markets. `set_borrow_cap` is the one that matters: until it lands, the market is inert.
+
+Confirm the admin the vote must execute from:
+
+```bash
+cast call $FACTORY "admin()(address)" --rpc-url $ETH_RPC_URL
+cast call $CONFIGURATOR "default_admin()(address)" --rpc-url $ETH_RPC_URL
+cast call $CONFIGURATOR "admins(address)(address)" $CONTROLLER --rpc-url $ETH_RPC_URL
+```
+
+**Ask for a small initial cap.** A cap can be raised by a later vote and lowered at any time; the
+first one should be sized to what you are willing to lose while the market's real behaviour is
+observed, not to the ambition for it. Curve's own reference markets launched capped.
+
+### What the proposal should say
+
+Reviewers will want the reasoning, not the addresses:
+
+- The pair, and that it is like-kind — the collateral is a wrapper over the borrowed token.
+- **The NAV is published weekly by a permissioned key and can be paused to zero.** State this
+  plainly. It is the market's central risk and reviewers will find it anyway; the argument is not
+  that the risk is absent but that the oracle bounds it — up-moves rate-limited to 0.25%/day at a
+  measured cost of ~0.11 bp, down-moves immediate, a pause freezes rather than zeroes. See
+  [02-oracle-shim.md](02-oracle-shim.md).
+- **Redemption is atomic, against the full supply, and slippage-free**, so liquidator depth is not a
+  risk variable — an exit always exists at a known price. This is a genuinely strong point and
+  reviewers will not assume it.
+- Why the parameters, especially that `liquidation_discount` clears the redemption spread.
+- That the monetary policy is Curve's own contract, with the bytecode argument.
+- That both shims are ownerless, and that the DAO retains `set_price_oracle` if either misbehaves.
+
+## Step 3 — Confirm execution
+
+```bash
+cast call $CONTROLLER "borrow_cap()(uint256)"        --rpc-url $ETH_RPC_URL
+cast call $CONTROLLER "admin_percentage()(uint256)"  --rpc-url $ETH_RPC_URL
+```
+
+## Step 4 — Seed the vault
+
+Borrowing needs lent liquidity. The vault is plain ERC-4626 over the gem:
+
+```bash
+cast send $GEM   "approve(address,uint256)" $VAULT <amount> --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+cast send $VAULT "deposit(uint256,address)"  <amount> $ETH_FROM --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+```
+
+The vault carries 1000 virtual shares as inflation-attack defence, so a fresh vault does **not**
+start at a 1:1 asset-to-share ratio. Use `convertToShares` / `convertToAssets`; do not assume.
+
+## Step 5 — First loan, deliberately small
+
+The first borrow is the real test of the whole stack. With an amount you are willing to lose:
+
+```bash
+cast call $CONTROLLER "max_borrowable(uint256,uint256,address)(uint256)" <collateral> <N> $ETH_FROM --rpc-url $ETH_RPC_URL
+cast call $CONTROLLER "create_loan_health_preview(uint256,uint256,uint256,address,bool)(int256)" <collateral> <debt> <N> $ETH_FROM true --rpc-url $ETH_RPC_URL
+```
+
+then open it, check `health()`, and close it. Confirm along the way:
+
+- `vault.borrow_apr()` and `lend_apr()` are sane.
+- `MP.target_rate()` — expect exactly `317097920` until the rate calculator has recorded two
+  publications. That is the floor, and correct at this stage.
+- Repayment works. This is the path that a frozen oracle must keep open.
+
+## Step 6 — Gauge and listing
+
+Optional, and separable:
+
+- Deploy a gauge over the vault's shares if lenders should earn CRV. Emissions then need their own
+  DAO approval and ongoing gauge weight.
+- Add the token icon to `curve-assets` if it is not already there.
+- Wire up the monitoring in [07-operations.md](07-operations.md) **before** the cap is raised
+  beyond the initial amount.
+
+## Done when
+
+- [ ] Vote passed and executed; `borrow_cap()` reads the intended value
+- [ ] `admin_percentage()` as intended
+- [ ] Vault seeded
+- [ ] A loan opened, health checked, and **repaid**
+- [ ] `borrow_apr()` / `lend_apr()` sane
+- [ ] Monitoring live
+- [ ] Addresses published in [instances/wstgbp.md](instances/wstgbp.md)
