@@ -12,21 +12,30 @@ interface IDecimals {
 
 /// @title WsgemLlamalendOracle
 /// @author Arb Capital
-/// @notice Ownerless Curve Llamalend V2 price oracle for a wsgem/gem market: reports the price of
-///         one wsgem in gem, scaled by 1e18.
+/// @notice Ownerless Curve Llamalend V2 price oracle for a wsgem/gem market: reports the
+///         redemption price of one wsgem in gem -- the wrapper's `burncost()` -- scaled by 1e18.
 /// @dev There is no owner, no ward, no setter and no upgrade path. Every parameter is `immutable`,
-///      set once at construction. The only mutable state is the two-word rate-limit checkpoint.
+///      set once at construction. The only mutable state is three words: the rate-limit anchor,
+///      its checkpoint time, and the live-zero flag.
 ///      This is deliberate: the wsgem's NAV is already a single storage slot behind a single key,
 ///      and the point of this shim is to stand between that and a lending market -- not to add a
 ///      second discretionary party on top of it.
 ///
 ///      DENOMINATION. Llamalend wants one unit of COLLATERAL priced in the BORROWED token, times
 ///      1e18, regardless of either token's decimals. For a wsgem collateral / gem borrowed market
-///      that is exactly the wsgem's NAV, which the feed already publishes in WAD. The constructor
+///      that is the wsgem's redemption quote (`burncost`): the NAV net of the wrapper's
+///      redemption spread, published in WAD, and the price at which an exit is actually
+///      executable -- the market's floor. Collateral is therefore never valued above what
+///      redemption pays for it, with one wei-sized exception: a live feed quoting exactly zero
+///      is reported as one wei, because zero must never reach Llamalend (hazard 4 below).
+///      The quote is read live on every call, so a change to the
+///      wrapper's spread flows through as an ordinary price move: a spread cut is an upward move
+///      and rate-limited like any other, a spread increase is a downward move and passes through
+///      immediately, which is correct because the floor genuinely dropped. The constructor
 ///      asserts both tokens are 18 decimals so the identity holds; an 18/non-18 pair would need a
 ///      scaling term this contract deliberately does not carry.
 ///
-///      THE THREE HAZARDS, and what is done about each:
+///      THE FOUR HAZARDS, and what is done about each:
 ///
 ///      1. `price()` and `price_w()` must agree. `LendFactory.create` reads `price()` into a local
 ///         and asserts `price_w()` returns the same number; the AMM then uses the view on read
@@ -47,6 +56,20 @@ interface IDecimals {
 ///         to `MAX_UPSIDE_SPEED` per second, relative, measured from the last reported price;
 ///         downward moves pass through immediately, because under-valuing collateral is the safe
 ///         direction and hiding a genuine loss behind a stale high price is not.
+///
+///      4. A live feed can quote zero. The wrapper's redemption spread is settable to 100%, which
+///         makes `burncost()` zero while the NAV stays live. That is not a pause -- the floor is
+///         genuinely nothing -- so it is not frozen over: freezing would keep borrowing open
+///         against collateral that redemption values at nothing. The reported price drops to one
+///         wei instead (the smallest value Llamalend accepts), carried as a distinct STATE
+///         rather than a reserved price value, so a genuine one-wei quote stays an ordinary
+///         price. The floor is never anchored, and recovery from it is the upside limit's SOLE
+///         exception: the reported price may return to the held anchor's ceiling in one block,
+///         because the round trip through a failure state is not a price increase -- the
+///         admissible maximum never rose above what the anchor's own ceiling allows. Entering
+///         and leaving the state emit `QuoteZeroed`/`QuoteRestored`; `quoteIsZero()`
+///         distinguishes it from `frozen()`. Down, pause and zero are all failure states for
+///         this feed -- in normal operation the NAV only rises.
 ///
 ///      ON THE CHOICE OF RATE LIMIT. Curve's own `price_oracles/v2/ERC4626EMAWrapper.vy` smooths
 ///      the upside with an exponential moving average. This contract uses the linear speed cap
@@ -73,7 +96,7 @@ contract WsgemLlamalendOracle is IPriceOracle {
     ///      `MAX_UPSIDE_SPEED * MAX_ELAPSED` far away from anything that could overflow.
     uint256 public constant MAX_UPSIDE_SPEED_LIMIT = WAD / 1 hours;
 
-    /// @notice Upper bound on the gas forwarded to the feed on a read.
+    /// @notice Upper bound on the gas forwarded to the feed on each of the two reads.
     /// @dev The pip sits behind an upgradeable proxy, so a hostile or broken implementation could
     ///      otherwise burn the transaction's whole gas allowance -- the one way `price()` could
     ///      still fail after a plain revert has been folded into a freeze. A live read costs on
@@ -81,6 +104,25 @@ contract WsgemLlamalendOracle is IPriceOracle {
     ///      order of magnitude of headroom for a legitimate proxy upgrade; an implementation that
     ///      exceeds it reads as paused, which is the freeze path and alarmed by `frozen()`.
     uint256 public constant PIP_READ_GAS = 250_000;
+
+    /// @notice What a live feed with a zero redemption quote is reported as: one wei.
+    /// @dev The wrapper's spread is settable to 100%, which makes `burncost()` zero while the NAV
+    ///      stays live. That is not a pause -- the floor is genuinely nothing -- but zero must
+    ///      never reach Llamalend, so the reported price is the smallest value it accepts. A
+    ///      report in this state is never anchored; see `price_w`. A GENUINE one-wei quote is a
+    ///      different thing entirely and is treated as any other price.
+    uint256 internal constant LIVE_ZERO_PRICE = 1;
+
+    // --- Types -------------------------------------------------------------------------------
+
+    /// @dev What a read of the feed resolved to. `PAUSED` covers a zero NAV and every unreadable
+    ///      shape; `LIVE_ZERO` is a live feed whose redemption quote is zero; `QUOTE` carries a
+    ///      real price, one wei included.
+    enum Spot {
+        PAUSED,
+        LIVE_ZERO,
+        QUOTE
+    }
 
     // --- Immutables --------------------------------------------------------------------------
 
@@ -90,8 +132,11 @@ contract WsgemLlamalendOracle is IPriceOracle {
     /// @notice The gem the price is denominated in. Read from the wsgem at construction.
     address public immutable GEM;
 
-    /// @notice The wsgem's price feed. `pip` is `immutable` on the wsgem, so caching it here is
-    ///         byte-identical to routing through `wsgem.navprice()` and one call cheaper.
+    /// @notice The wsgem's price feed, cached at construction.
+    /// @dev The pause signal is read from this feed directly; the price itself comes from
+    ///      `WSGEM.burncost()`, which reads the same feed and nets off the spread. The cached
+    ///      address also lets a deploy script and an operator confirm the wiring without
+    ///      trusting this contract's word for it.
     IPip public immutable PIP;
 
     /// @notice Maximum relative increase in the reported price, per second, scaled by 1e18.
@@ -104,26 +149,42 @@ contract WsgemLlamalendOracle is IPriceOracle {
 
     // --- Storage -----------------------------------------------------------------------------
 
-    /// @notice The last price this oracle reported through `price_w`. Never zero after
-    ///         construction.
+    /// @notice The rate-limit anchor: the last QUOTE-state price `price_w` persisted. Never zero
+    ///         after construction. During a live-zero episode the report is one wei while this
+    ///         holds the recovery anchor, so it is not always the last reported price.
     uint256 public cachedPrice;
 
-    /// @notice When `cachedPrice` was last written.
+    /// @notice When the checkpoint was last touched. Refreshed by every `price_w`, freezes and
+    ///         live-zero reports included, so no upside allowance accrues through either.
     uint256 public cachedTimestamp;
+
+    /// @notice Whether the last `price_w` report was the one-wei live-zero floor.
+    /// @dev What lets a subsequent pause hold the floor rather than snapping back to the anchor,
+    ///      and what gates the `QuoteZeroed`/`QuoteRestored` transition events.
+    bool public liveZeroReported;
 
     // --- Errors ------------------------------------------------------------------------------
 
     error ZeroAddress();
     error UnsupportedDecimals();
     error OraclePaused();
+    error QuoteIsZero();
     error SpeedTooHigh();
 
     // --- Events ------------------------------------------------------------------------------
 
-    /// @notice Emitted by `price_w` whenever the reported price moves.
+    /// @notice Emitted by `price_w` whenever the anchored price moves.
     /// @param price The newly reported price, WAD gem-per-wsgem.
-    /// @param spot  The raw feed reading at that moment, or zero if the feed was unreadable.
+    /// @param spot  The raw redemption quote at that moment.
     event PriceUpdated(uint256 indexed price, uint256 indexed spot);
+
+    /// @notice Emitted by `price_w` when the report enters the one-wei live-zero floor.
+    /// @param anchor The rate-limit anchor being held for recovery.
+    event QuoteZeroed(uint256 indexed anchor);
+
+    /// @notice Emitted by `price_w` when the report leaves the floor.
+    /// @param price The price reported on the way out.
+    event QuoteRestored(uint256 indexed price);
 
     // --- Construction ------------------------------------------------------------------------
 
@@ -146,10 +207,11 @@ contract WsgemLlamalendOracle is IPriceOracle {
         PIP              = IPip(pip_);
         MAX_UPSIDE_SPEED = maxUpsideSpeed_;
 
-        // Refuse to deploy against a paused feed. There would be no last-good price to freeze at,
-        // and `LendFactory.create` rejects a zero price anyway.
-        uint256 spot_ = _spot();
-        if (spot_ == 0) revert OraclePaused();
+        // Refuse to deploy against a paused feed -- there would be no last-good price to freeze
+        // at -- or against a zero redemption quote, which is not a price to anchor a market on.
+        (Spot state_, uint256 spot_) = _spot();
+        if (state_ == Spot.PAUSED) revert OraclePaused();
+        if (state_ == Spot.LIVE_ZERO) revert QuoteIsZero();
 
         cachedPrice     = spot_;
         cachedTimestamp = block.timestamp;
@@ -161,9 +223,10 @@ contract WsgemLlamalendOracle is IPriceOracle {
 
     /// @notice Price of one wsgem in gem, scaled by 1e18.
     /// @dev Never returns zero. See the contract-level note for what happens when the feed is
-    ///      paused or unreadable.
+    ///      paused or unreadable, and when it quotes zero.
     function price() external view returns (uint256) {
-        return _price(_spot());
+        (Spot state_, uint256 spot_) = _spot();
+        return _price(state_, spot_);
     }
 
     /// @notice Same value as `price()`, persisting the rate-limit checkpoint.
@@ -172,72 +235,123 @@ contract WsgemLlamalendOracle is IPriceOracle {
     ///      price track the feed more closely but cannot push it past the feed, so there is
     ///      nothing to gain by sampling. Under normal operation the AMM drives it.
     function price_w() external returns (uint256) {
-        uint256 spot_  = _spot();
-        uint256 price_ = _price(spot_);
+        (Spot state_, uint256 spot_) = _spot();
+        uint256 price_ = _price(state_, spot_);
 
         // Always refresh the timestamp, including through a freeze. The rate limit measures time
         // since the last REPORTED price, and a freeze is a report of the same value -- letting
         // allowance accrue across a pause would hand the feed a free jump on the way out.
         cachedTimestamp = block.timestamp;
 
-        if (price_ != cachedPrice) {
-            cachedPrice = price_;
-            emit PriceUpdated(price_, spot_);
+        if (state_ == Spot.LIVE_ZERO) {
+            // The floor is reported but never anchored: it is a failure state, not a price to
+            // ratchet from. Keeping the last real anchor is what lets a restored quote return
+            // -- downward at full speed, upward bounded by the anchor's own ceiling -- rather
+            // than ratcheting up from one wei. The transition is evented once, not per call.
+            if (!liveZeroReported) {
+                liveZeroReported = true;
+                emit QuoteZeroed(cachedPrice);
+            }
+        } else if (state_ == Spot.QUOTE) {
+            if (liveZeroReported) {
+                liveZeroReported = false;
+                emit QuoteRestored(price_);
+            }
+            if (price_ != cachedPrice) {
+                cachedPrice = price_;
+                emit PriceUpdated(price_, spot_);
+            }
         }
+        // PAUSED mutates nothing beyond the timestamp: a freeze preserves the last report,
+        // the live-zero flag included.
 
         return price_;
     }
 
     // --- Views -------------------------------------------------------------------------------
 
-    /// @notice The raw feed reading, undamped. Zero when the feed is paused or unreadable.
-    /// @dev For monitoring: a persistent gap between this and `price()` means the rate limit is
-    ///      binding, which in ordinary operation it should not be.
+    /// @notice The wrapper's live redemption quote, undamped. Zero when the feed is paused or
+    ///         unreadable AND when the live quote is genuinely zero -- `frozen()` and
+    ///         `quoteIsZero()` tell the two apart.
+    /// @dev For monitoring: a persistent `price() < spotPrice()` means the rate limit is
+    ///      binding, which in ordinary operation it should not be. That ordering is the exact
+    ///      signal -- both failure states read zero here with the price above it.
     function spotPrice() external view returns (uint256) {
-        return _spot();
+        (Spot state_, uint256 spot_) = _spot();
+        return state_ == Spot.QUOTE ? spot_ : 0;
     }
 
     /// @notice The highest price `price_w` could report right now.
-    /// @dev Equals `cachedPrice` when no time has passed. Reported price is
-    ///      `min(spot, priceCeiling())`, or `cachedPrice` when spot is zero.
+    /// @dev Equals `cachedPrice` when no time has passed. In the QUOTE state the reported price
+    ///      is `min(spot, priceCeiling())`; a pause holds the last report and a live-zero quote
+    ///      reports one wei, neither of which this ceiling applies to.
     function priceCeiling() external view returns (uint256) {
         return _ceiling();
     }
 
-    /// @notice Whether the feed is currently unreadable, so the reported price is frozen.
+    /// @notice Whether the feed is currently paused or unreadable, so the reported price is
+    ///         frozen at the last report.
     function frozen() external view returns (bool) {
-        return _spot() == 0;
+        (Spot state_,) = _spot();
+        return state_ == Spot.PAUSED;
+    }
+
+    /// @notice Whether the feed is live but the redemption quote is zero -- a 100% spread. The
+    ///         reported price is one wei and is not being anchored.
+    function quoteIsZero() external view returns (bool) {
+        (Spot state_,) = _spot();
+        return state_ == Spot.LIVE_ZERO;
     }
 
     // --- Internals ---------------------------------------------------------------------------
 
-    /// @notice The feed reading, with an unreadable feed folded into the same zero the feed itself
-    ///         uses to signal a pause.
-    /// @dev `pip` sits behind an upgradeable proxy, so `read()` reverting is a real state and not
-    ///      a reason for this contract to revert in turn; a short return is treated the same way.
-    ///      The call is capped at `PIP_READ_GAS` and only the first return word is ever copied, so
-    ///      an implementation that burns gas or returns an enormous payload is folded into the
-    ///      same freeze rather than allowed to break the market's read path with an out-of-gas.
-    function _spot() internal view returns (uint256) {
-        bytes memory data_ = abi.encodeCall(IPip.read, ());
-        address pip_ = address(PIP);
-        bool ok_;
+    /// @notice What the feed currently resolves to, with the quote alongside when there is one.
+    /// @dev The NAV is the pause signal -- the feed publishes zero to pause, and an unreadable
+    ///      feed is the same state with a different shape. Reading it separately from the quote
+    ///      is what distinguishes "the feed is dark, hold the last report" from "the feed is
+    ///      live and the floor is genuinely nothing", which are different failures with
+    ///      different correct responses. A genuine one-wei quote is a QUOTE like any other; the
+    ///      state, not a reserved price value, is what carries the distinction.
+    function _spot() internal view returns (Spot state_, uint256 quote_) {
+        (bool okNav_, uint256 nav_) = _readWord(address(PIP), abi.encodeCall(IPip.read, ()));
+        if (!okNav_ || nav_ == 0) return (Spot.PAUSED, 0);
+
+        bool okQuote_;
+        (okQuote_, quote_) = _readWord(address(WSGEM), abi.encodeCall(IWsgem.burncost, ()));
+        if (!okQuote_) return (Spot.PAUSED, 0);
+
+        if (quote_ == 0) return (Spot.LIVE_ZERO, 0);
+        return (Spot.QUOTE, quote_);
+    }
+
+    /// @dev Gas-capped, one-word staticcall: a revert, a short return, a gas burn or an
+    ///      oversized payload all come back as `(false, 0)` rather than propagating. Both feed
+    ///      reads route through here.
+    function _readWord(address target_, bytes memory data_)
+        internal
+        view
+        returns (bool ok_, uint256 word_)
+    {
         uint256 size_;
-        uint256 nav_;
         assembly ("memory-safe") {
-            ok_   := staticcall(PIP_READ_GAS, pip_, add(data_, 0x20), mload(data_), 0x00, 0x20)
+            ok_   := staticcall(PIP_READ_GAS, target_, add(data_, 0x20), mload(data_), 0x00, 0x20)
             size_ := returndatasize()
-            nav_  := mload(0x00)
+            word_ := mload(0x00)
         }
-        if (!ok_ || size_ < 32) return 0;
-        return nav_;
+        if (!ok_ || size_ < 32) return (false, 0);
+        return (ok_, word_);
     }
 
     /// @notice The reported price for a given feed reading.
     /// @dev Pure with respect to the checkpoint, which is what makes `price()` and `price_w()`
-    ///      agree within a call.
-    function _price(uint256 spot_) internal view returns (uint256) {
-        if (spot_ == 0) return cachedPrice; // frozen: last good price, never zero
+    ///      agree within a call. A freeze holds the last REPORT -- the one-wei floor included,
+    ///      when that is what was last reported -- not the last anchor.
+    function _price(Spot state_, uint256 spot_) internal view returns (uint256) {
+        if (state_ == Spot.PAUSED) {
+            return liveZeroReported ? LIVE_ZERO_PRICE : cachedPrice; // frozen: never zero
+        }
+        if (state_ == Spot.LIVE_ZERO) return LIVE_ZERO_PRICE;
+
         uint256 ceiling_ = _ceiling();
         return spot_ < ceiling_ ? spot_ : ceiling_;
     }

@@ -74,6 +74,7 @@ cast call $ORACLE "frozen()(bool)"       --rpc-url $ETH_RPC_URL
 |---|---|---|
 | **Rate limit binding** | `price() < spotPrice()` for > 12h | A weekly step clears in ~6.5 hours, so 12h means either the yield outran `MAX_UPSIDE_SPEED` or someone published a jump. Investigate which. |
 | **Feed frozen** | `frozen() == true` for > 1h | Feed paused or its proxy broken. Collateral is being valued on a held price. |
+| **Quote is zero** | `quoteIsZero() == true` | The wrapper's redemption spread reached 100%: redemption pays nothing and the reported price is one wei. Not a pause — new borrowing is closed and the last real anchor is kept for recovery. Escalate to the wrapper's operators. |
 | **Publication missed** | Polled `spotPrice()` unchanged in > 9 days | Cadence is weekly. Nine days is late. There is no on-chain staleness guard — this alarm is the guard. |
 | **NAV fell** | `spotPrice()` below its previous value | Passes straight through to collateral value. Check liquidation queue immediately. |
 
@@ -83,9 +84,10 @@ only fires when traffic drives `price_w`, so an idle market — including the en
 same idleness also means nothing is checkpointing the rate calculator; that is harmless (both
 shims read the live feed), but it is why the event stream goes quiet, not the feed.
 
-`PriceUpdated(price, spot)` is emitted by `price_w` whenever the reported price moves, with the raw
-spot alongside — so on a trafficked market the gap between the two is reconstructable from logs
-alone.
+`PriceUpdated(price, spot)` is emitted by `price_w` whenever the anchored price moves, with the
+raw spot alongside, and `QuoteZeroed(anchor)` / `QuoteRestored(price)` mark entry into and exit
+from the one-wei zero-quote state — so on a trafficked market the full report history is
+reconstructable from logs alone.
 
 ### The borrow rate is being set by something real
 

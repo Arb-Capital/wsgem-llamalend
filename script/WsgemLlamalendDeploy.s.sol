@@ -103,6 +103,7 @@ abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
         require(wsgem_.gem() == GEM(), "gem mismatch");
         require(wsgem_.decimals() == 18, "wsgem is not 18 decimals");
         require(wsgem_.navprice() > 0, "feed is paused -- refusing to deploy against a zero NAV");
+        require(wsgem_.burncost() > 0, "redemption quote is zero -- refusing to deploy");
     }
 
     /// @notice Every property an oracle must have to be used by this market, fresh or reused.
@@ -120,9 +121,10 @@ abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
         require(address(oracle_.PIP()) == IWsgem(WSGEM()).pip(), "oracle: pip mismatch");
         require(oracle_.MAX_UPSIDE_SPEED() == MAX_UPSIDE_SPEED(), "oracle: speed mismatch");
 
-        // Liveness. A frozen oracle is reporting a held price, which is not a basis for setting a
-        // market's opening band.
+        // Liveness. A frozen oracle is reporting a held price, and a zero-quote one is reporting
+        // one wei; neither is a basis for setting a market's opening band.
         require(!oracle_.frozen(), "oracle: feed is frozen -- refusing to build on a held price");
+        require(!oracle_.quoteIsZero(), "oracle: redemption quote is zero");
 
         uint256 p_ = oracle_.price();
         require(p_ > 0, "oracle: zero price");
@@ -131,12 +133,12 @@ abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
     }
 
     /// @notice The extra check that only holds for an oracle deployed in this run.
-    /// @dev A fresh oracle checkpoints the feed in its constructor, so the rate limit cannot be
-    ///      binding against itself yet and the reported price must equal the live NAV exactly. A
-    ///      reused oracle may legitimately sit below spot while it absorbs a publication, so this
-    ///      is not asserted there.
+    /// @dev A fresh oracle checkpoints the quote in its constructor, so the rate limit cannot be
+    ///      binding against itself yet and the reported price must equal the live redemption
+    ///      quote exactly. A reused oracle may legitimately sit below spot while it absorbs a
+    ///      publication, so this is not asserted there.
     function _assertFreshOracle(WsgemLlamalendOracle oracle_) internal view {
-        require(oracle_.price() == IWsgem(WSGEM()).navprice(), "oracle: price != navprice");
+        require(oracle_.price() == IWsgem(WSGEM()).burncost(), "oracle: price != burncost");
     }
 }
 
@@ -167,8 +169,8 @@ abstract contract WsgemOracleScript is WsgemLlamalendScript {
         console.log("  max upside/sec ..:", oracle_.MAX_UPSIDE_SPEED());
         console.log("  price ...........:", oracle_.price());
         console.log("---");
-        console.log("NEXT: record this address, then watch price() against the live NAV across at");
-        console.log("      least one publication before deploying the market against it.");
+        console.log("NEXT: record this address, then watch price() against the live burncost()");
+        console.log("      across at least one publication before deploying the market against it.");
     }
 }
 

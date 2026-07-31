@@ -68,6 +68,7 @@ cast call $WSGEM "pip()(address)"        --rpc-url $ETH_RPC_URL  # the feed the 
 cast call $WSGEM "decimals()(uint8)"     --rpc-url $ETH_RPC_URL  # expect: 18
 cast call $GEM   "decimals()(uint8)"     --rpc-url $ETH_RPC_URL  # expect: 18
 cast call $WSGEM "navprice()(uint256)"   --rpc-url $ETH_RPC_URL  # expect: non-zero
+cast call $WSGEM "burncost()(uint256)"   --rpc-url $ETH_RPC_URL  # expect: non-zero, <= navprice
 ```
 
 A zero `navprice` means the feed is paused. Both shims refuse to deploy against it, deliberately —
@@ -90,8 +91,8 @@ Full address list in [reference/addresses.md](reference/addresses.md).
 ## 6. Run the suites
 
 ```bash
-make test        # 126 unit + invariant tests, no RPC
-make test-fork   # 28 fork tests against live mainnet state
+make test        # 134 unit + invariant tests, no RPC
+make test-fork   # 31 fork tests against live mainnet state
 ```
 
 `make test-fork` hard-fails without a mainnet RPC rather than skipping. That is deliberate: a
@@ -119,6 +120,7 @@ stays shut until the Configurator opens it.
 - [ ] Keystore imported, `ETH_FROM` matches it
 - [ ] wsgem constants confirmed on-chain against `script/WstGBP.s.sol`
 - [ ] `navprice()` non-zero
+- [ ] `burncost()` non-zero and at or below `navprice()`
 - [ ] Factory live, unpaused, version 2.0.0
 - [ ] `make test` green
 - [ ] `make test-fork` green

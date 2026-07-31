@@ -33,7 +33,7 @@ constants, done.
 
 | | |
 |---|---|
-| `src/WsgemLlamalendOracle.sol` | Ownerless `price()`/`price_w()` shim. Rate-limits up, passes down, freezes on zero. |
+| `src/WsgemLlamalendOracle.sol` | Ownerless `price()`/`price_w()` shim. Reports the redemption quote: rate-limits up, passes down, freezes on pause, floors a live zero quote at one wei. |
 | `src/WsgemRateCalculator.sol` | Ownerless `rate()`/`rate_w()` shim. Realised yield across the last 4 publications. |
 | `src/interfaces/` | Solidity translations of Curve's Vyper interfaces. |
 | `script/WsgemLlamalendDeploy.s.sol` | Generic deploy bases. No token knowledge. |
@@ -47,8 +47,8 @@ constants, done.
 
 ```bash
 make deps && make build
-make test          # 126 unit + invariant tests, no RPC
-make test-fork     # 28 tests against live mainnet state (needs ETH_RPC_URL)
+make test          # 134 unit + invariant tests, no RPC
+make test-fork     # 31 tests against live mainnet state (needs ETH_RPC_URL)
 
 make oracle-dry    # simulate the oracle deploy against live state
 make market-dry    # simulate the whole market deploy, every assert running
@@ -65,7 +65,7 @@ match a real deploy's.
 |---|---|
 | [00-architecture.md](docs/00-architecture.md) | What a market is made of, the deployment cycle, who holds what power |
 | [01-prerequisites.md](docs/01-prerequisites.md) | Toolchain, environment, pre-flight checks |
-| [02-oracle-shim.md](docs/02-oracle-shim.md) | The three hazards and what is done about each |
+| [02-oracle-shim.md](docs/02-oracle-shim.md) | The four hazards and what is done about each |
 | [03-rate-calculator…](docs/03-rate-calculator-and-monetary-policy.md) | Why the long window, and Curve's policy |
 | [04-parameters.md](docs/04-parameters.md) | Every number, its bounds, and why |
 | [05-deploy-mainnet.md](docs/05-deploy-mainnet.md) | The runbook |
@@ -90,9 +90,11 @@ them, and a rate change is tracked within a month rather than averaged against t
 history. [docs/02](docs/02-oracle-shim.md),
 [docs/03](docs/03-rate-calculator-and-monetary-policy.md)
 
-**The oracle predicts nothing; the rate calculator does.** `price()` is `min(spot, ceiling)` — it
-can only ever under-report, never over-report, so collateral is always valued at the executable
-redemption rate or less. Only the borrow rate extrapolates, and only from realised growth.
+**The oracle predicts nothing; the rate calculator does.** `price()` reports the wrapper's
+redemption quote (`burncost`) capped by the rate limit — it can only ever under-report, never
+over-report, so collateral is always valued at what redemption actually pays, or less. The one
+wei-sized exception: a live feed quoting exactly zero is reported as one wei, since Llamalend
+cannot accept zero. Only the borrow rate extrapolates, and only from realised growth.
 Upward price moves are rate-limited to 0.25%/day at a measured cost of ~0.11 bp; downward moves
 pass through in one block, deliberately and irreversibly.
 [docs/02](docs/02-oracle-shim.md#what-the-limit-is-and-is-not-for)

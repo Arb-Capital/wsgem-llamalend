@@ -28,6 +28,13 @@ interface IWsgem {
     ///      wsgem itself signals.
     function navprice() external view returns (uint256);
 
+    /// @notice The redemption quote in WAD gem-per-wsgem: what one wsgem actually redeems for,
+    ///         i.e. the NAV net of the wrapper's redemption spread.
+    /// @dev Zero when the feed is paused, like `navprice()`. The spread is technically adjustable
+    ///      on the wrapper (no getter is exposed for it), so consumers should read this quote
+    ///      live rather than reconstructing it from `navprice()` and a cached fee.
+    function burncost() external view returns (uint256);
+
     /// @notice ERC-20 decimals. Constant 18 on every wsgem to date; shims assert it anyway.
     function decimals() external view returns (uint8);
 }

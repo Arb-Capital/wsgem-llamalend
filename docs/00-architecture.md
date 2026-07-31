@@ -48,10 +48,11 @@ subtract risk.
 
 ### `WsgemLlamalendOracle`
 
-Reports the price of one wsgem in gem, WAD-scaled — which for an 18/18 pair is the NAV itself.
-Three behaviours, each answering a specific hazard: upward moves are rate-limited, downward moves
-pass through immediately, and a zero or unreadable feed freezes the last good price rather than
-propagating a zero. See [02-oracle-shim.md](02-oracle-shim.md).
+Reports the price of one wsgem in gem, WAD-scaled — which for an 18/18 pair is the redemption
+quote (`burncost()`), the executable floor. Four behaviours, each answering a specific hazard:
+upward moves are rate-limited, downward moves pass through immediately, a paused or unreadable
+feed freezes the last report rather than propagating a zero, and a live feed quoting zero is
+floored at one wei without being anchored. See [02-oracle-shim.md](02-oracle-shim.md).
 
 ### `WsgemRateCalculator`
 

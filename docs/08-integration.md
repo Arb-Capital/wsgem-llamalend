@@ -86,12 +86,18 @@ surface that as "not yet live" rather than as a failure.
 The market's oracle is `m.price_oracle`, and for a wsgem market it is this repo's shim.
 
 ```solidity
-uint256 p = IPriceOracle(oracle).price();   // wsgem in gem, 1e18
+uint256 p = IPriceOracle(oracle).price();   // wsgem in gem, 1e18 -- the redemption quote
 ```
+
+The reported price is the wrapper's `burncost()`: the NAV net of the redemption spread, which is
+what one wsgem actually redeems for. Collateral is therefore valued at the executable floor, and
+borrowing power is quoted against it.
 
 Integrating against it, three properties matter:
 
-- **It never returns zero.** A paused or unreadable feed freezes the last good price.
+- **It never returns zero.** A paused or unreadable feed freezes the last good price. A live
+  feed whose redemption quote is zero — a 100% spread — is reported as one wei, so display code
+  should tolerate a dust price without dividing by it.
 - **It can lag the underlying feed.** Upward moves are rate-limited to 0.25%/day, so an ordinary
   weekly step takes about 6.5 hours to be fully reflected. Compare `price()` against `spotPrice()`
   if you need to know whether the limit is currently binding. Downward moves are not limited.

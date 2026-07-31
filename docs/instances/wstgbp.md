@@ -29,7 +29,9 @@ and `navprice()` was `1006710563072740256` (≈ 1.00671 gem per wsgem).
 
 Three properties drive nearly every design decision in this repo.
 
-1. **The NAV is a single storage slot behind a single permissioned key.** No market sets it.
+1. **The NAV is a single storage slot behind a single permissioned key.** No market sets it. In
+   normal operation it only rises; a downward publication, a pause, or a zero redemption quote
+   is a failure state, not routine.
 2. **It is published weekly, tracks a central-bank policy rate, and steps rather than accruing.**
    So there is no meaningful on-chain staleness bound — a six-day-old price is normal — and a rate
    calculator measuring on a wall clock produces a sawtooth. Hence the freeze-on-zero behaviour in
@@ -111,14 +113,28 @@ on its floor through exactly the period during which the borrow cap is zero anyw
 
 ## Instance-specific notes
 
-- **`price()` reports the NAV mid, not the redemption bid.** A liquidator exiting through
-  redemption realises 25 bp less than the reported price. That is 25 bp out of the 100 bp
-  `liquidation_discount`, leaving 75 bp of real margin. Reporting `burncost` instead would move the
-  same 25 bp from the discount into the price — explicit rather than implicit — at the cost of 25 bp
-  of borrowing power for every borrower. The choice was to keep the borrowing power.
+- **`price()` reports the redemption quote (`burncost`), not the NAV mid.** A liquidator exiting
+  through redemption realises exactly the reported price, so the full 100 bp
+  `liquidation_discount` is margin relative to the executable floor, and an arbitrageur trading
+  against the AMM does not have the 25 bp exit spread eating their edge relative to the oracle —
+  the spread is already in the price. The cost is 25 bp of borrowing power for every borrower,
+  relative to a mid-based oracle. The wrapper's spread is technically adjustable (not intended to
+  change in operation); the oracle reads the quote live, so a spread cut arrives rate-limited and
+  a spread increase passes through immediately. At the settable maximum of 100% the quote is zero
+  and the oracle reports one wei without anchoring it — see hazard 4 in
+  [../02-oracle-shim.md](../02-oracle-shim.md).
 - **Redemption is atomic, against the full supply, and slippage-free.** So liquidator depth is not a
   risk variable: an exit always exists at a known price, however large the position. This differs
-  from a market whose liquidation depends on pool depth.
+  from a market whose liquidation depends on pool depth. The path has three gates, all open as
+  configured on 2026-07-30: a compliance check (`canPass`, admitting arbitrary addresses as
+  deployed), a burn window (`burnable()`, scheduled by the wrapper's `act`), and a settlement
+  cooldown (zero, so redemption settles within the transaction). Payout is bounded by the
+  wrapper's gem balance, which covered the full supply at the verification block. A closed burn
+  window delays initiation, and the quote can move before it reopens — no price is locked until a
+  redemption is initiated; a non-zero cooldown delays settlement of a claim whose amount is
+  locked at initiation. The fork suite executes a redemption, confirms the payout equals
+  `price()` per wsgem, and asserts the reserves cover a full-supply exit at the quote plus
+  pending claims.
 - **A downward NAV publication passes through immediately.** By design — see
   [../07-operations.md](../07-operations.md). It can move loans into liquidation within one
   block, irreversibly; the oracle does not limit downward moves.

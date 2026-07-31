@@ -169,13 +169,16 @@ contract WsgemRateMathTest is Test {
         assertGt(o_.price_w(), 0);
     }
 
-    /// @dev Dust. Below roughly 58 wei a full week of allowance rounds to nothing, so the ceiling
-    ///      stops growing. Documented rather than fixed: it can only be reached if the NAV has
-    ///      already collapsed to 5.8e-17 of a gem, and being stuck low is the safe direction.
+    /// @dev Dust. Below roughly 58 wei a full week of allowance rounds to nothing, so the
+    ///      ceiling stops growing. Documented rather than fixed: it can only be reached if the
+    ///      NAV has already collapsed to 5.8e-17 of a gem, and being stuck low is the safe
+    ///      direction. A genuine one-wei QUOTE is an ordinary price and anchors like any other
+    ///      -- the live-zero state is carried separately, not as a reserved price value.
     function test_aDustPriceStopsRatchetingButNeverReverts() public {
         pip.poke(1);
         oracle.price_w();
         assertEq(oracle.price(), 1);
+        assertFalse(oracle.quoteIsZero(), "a genuine one-wei quote is not the zero-quote state");
 
         skip(oracle.MAX_ELAPSED());
         assertEq(oracle.priceCeiling(), 1, "growth rounds to zero at dust");

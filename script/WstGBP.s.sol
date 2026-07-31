@@ -17,7 +17,8 @@ abstract contract WstGBPConstants {
     //
     // Collateral is the wsgem, borrowed is the gem: the looping direction, where a borrower posts
     // the yield-bearing wrapper and borrows the underlying. Both are 18 decimals, which is what
-    // makes the oracle's WAD NAV directly usable as Llamalend's collateral-in-borrowed price.
+    // makes the wrapper's WAD redemption quote directly usable as Llamalend's
+    // collateral-in-borrowed price.
 
     address internal constant WSTGBP = 0x57C3571f10767E49C9d7b60feb6c67804783B7aE;
     address internal constant TGBP   = 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287;

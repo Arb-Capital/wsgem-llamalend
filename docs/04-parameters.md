@@ -50,14 +50,15 @@ at zero regardless of this value. See [06-post-deployment.md](06-post-deployment
 
 **Liquidator depth is not a variable here.** Redemption through the wrapper is atomic, against the
 full supply, and slippage-free at the redemption bid — so a liquidator always has an exit at a known
-price, however large the position. The requirement on `liquidation_discount` is therefore just that
-it clears the redemption spread (25 bp for the first instance) with margin, which 100 bp does four
-times over. This differs from a market whose liquidation depends on pool depth.
+price, however large the position. The oracle reports that bid (`burncost`), so the whole 100 bp
+`liquidation_discount` is margin relative to the executable floor rather than partly consumed by
+the exit spread. This differs from a market whose liquidation depends on pool depth.
 
 **Still review before broadcast.** These came from a market with different collateral and a
-different underlying. Check the interaction between the exit
-spread, the AMM `fee` and the band structure: LLAMMA's soft liquidation depends on arbitrageurs
-trading against the AMM, and they face the same exit spread, so their edge has to clear it.
+different underlying. Check the interaction between the AMM `fee` and the band structure: LLAMMA's
+soft liquidation depends on arbitrageurs trading against the AMM. Because the oracle prices at the
+redemption quote, the exit spread is already in the price the AMM anchors to, and the
+arbitrageur's edge is the AMM discount net of the 0.2% fee — the spread does not come out of it.
 
 ## Monetary policy curve
 

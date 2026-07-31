@@ -39,12 +39,13 @@ oracle ............: 0x…
   gem .............: 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287
   pip .............: 0x6A79dCe61A12aa4b75449e0B03746260765D07dF
   max upside/sec ..: 28935185185
-  price ...........: <the live NAV, exactly>
+  price ...........: <the live burncost, exactly>
 ---
 ```
 
-`price` must equal `navprice()` exactly. A fresh oracle checkpoints at construction, so the rate
-limit cannot be binding against itself yet — anything else means the wrong wsgem is configured.
+`price` must equal `burncost()` exactly — the redemption quote, which sits 25 bp below
+`navprice()` for this instance. A fresh oracle checkpoints at construction, so the rate limit
+cannot be binding against itself yet — anything else means the wrong wsgem is configured.
 
 Record the address, then:
 
@@ -52,6 +53,7 @@ Record the address, then:
 export ORACLE=<deployed address>
 cast call $ORACLE "price()(uint256)"        --rpc-url $ETH_RPC_URL
 cast call $ORACLE "spotPrice()(uint256)"    --rpc-url $ETH_RPC_URL   # must equal price()
+cast call $WSGEM  "burncost()(uint256)"     --rpc-url $ETH_RPC_URL   # must equal price()
 cast call $ORACLE "frozen()(bool)"          --rpc-url $ETH_RPC_URL   # expect: false
 cast call $ORACLE "WSGEM()(address)"        --rpc-url $ETH_RPC_URL
 cast call $ORACLE "PIP()(address)"          --rpc-url $ETH_RPC_URL   # must equal wsgem.pip()
@@ -123,7 +125,7 @@ amm ...............: 0x…
 ---
 collateral ........: 0x57C3…B7aE
 borrowed ..........: 0x27f6…5287
-price .............: <the live NAV>
+price .............: <the live burncost>
 measured yield/sec : 0
 mp target rate/sec : 317097920
 mp target apr .....: 10000000005120000

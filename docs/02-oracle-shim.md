@@ -1,6 +1,6 @@
 # 2 — The oracle shim
 
-`src/WsgemLlamalendOracle.sol`. Ownerless, immutable, ~1.5 KB of runtime.
+`src/WsgemLlamalendOracle.sol`. Ownerless, immutable, ~2.1 KB of runtime.
 
 ## What Llamalend asks for
 
@@ -10,10 +10,17 @@ function price_w() external      returns (uint256);
 ```
 
 One unit of **collateral** priced in the **borrowed** token, times `1e18`, regardless of either
-token's own decimals. For a wsgem collateral / gem borrowed market that is the wsgem's NAV, which
-the feed already publishes in WAD — so with both tokens at 18 decimals the shim carries no scaling
-term at all. The constructor asserts both decimals rather than assuming them; an 18/non-18 pair
-needs a different contract, not a different constant.
+token's own decimals. For a wsgem collateral / gem borrowed market that is the wsgem's redemption
+quote — the wrapper's `burncost()`, the NAV net of the redemption spread, published in WAD. It is
+the price at which an exit is actually executable, so collateral is never valued above what
+redemption pays for it — with one wei-sized exception: a live feed quoting exactly zero is
+reported as one wei, because Llamalend cannot accept zero (hazard 4 below). The quote is read
+live on every call: the wrapper's spread is technically
+adjustable (though not intended to change in operation), and a spread cut arrives as an ordinary
+rate-limited rise while a spread increase passes through immediately, because the floor genuinely
+dropped. With both tokens at 18 decimals the shim carries no scaling term at all. The constructor
+asserts both decimals rather than assuming them; an 18/non-18 pair needs a different contract, not
+a different constant.
 
 ## The constraint that is easiest to get wrong
 
@@ -34,17 +41,19 @@ This shim computes the reported price as a pure function of the stored checkpoin
 persists afterwards:
 
 ```
-_price(spot) = spot == 0 ? cachedPrice : min(spot, ceiling(cachedPrice, elapsed))
+_price(state, spot) = state == PAUSED    ? last report (anchor, or the one-wei floor)
+                    : state == LIVE_ZERO ? 1 wei       (reported, never anchored)
+                    :                      min(spot, ceiling(cachedPrice, elapsed))
 
-price()   = _price(spot)
-price_w() = p = _price(spot); persist; return p
+price()   = _price(state, spot)
+price_w() = p = _price(state, spot); persist; return p
 ```
 
 so the two agree by construction. `invariant_priceAndPriceWAgree` asserts it across arbitrary
 sequences, and `test_theFactoryPriceCheckPassesAgainstTheLiveFeed` runs the factory's exact check
 against the live feed on a fork.
 
-## The three hazards
+## The four hazards
 
 ### 1. A paused feed reads zero
 
@@ -149,6 +158,27 @@ price would be valuing it above what anyone can realise for it. The cost of that
 mistaken downward publication liquidates positions in one block, irreversibly; nothing in this
 shim prevents that.
 
+### 4. A live feed can quote zero
+
+The wrapper's redemption spread is settable to 100%, which makes `burncost()` zero while the NAV
+stays live. That is not a pause, and the shim does not freeze over it: freezing would hold the old
+price while redemption pays nothing, keeping new borrowing open against collateral with no
+executable value. The reported price drops to one wei instead — the smallest value Llamalend
+accepts — which closes new borrowing. In normal operation this feed only rises; down, pause and
+zero are all failure states, and this is the handling for the last of them.
+
+The state is carried internally as a state, not as a reserved price value, so a genuine one-wei
+quote remains an ordinary price. The floor report is never anchored: the rate-limit checkpoint
+keeps the last real price, and when the spread is restored the report returns from that anchor —
+downward immediately, upward to at most the anchor's own ceiling, in one block. That recovery is
+the upside limit's **sole exception**, and it cannot raise the price above what the anchor's
+ceiling already allowed; the limit's invariant is stated against the last *anchored* price for
+exactly this reason. Entering and leaving the state emit `QuoteZeroed(anchor)` and
+`QuoteRestored(price)`, once per transition. A pause that follows a witnessed zero quote keeps
+holding the floor — a freeze preserves the last report, whatever it was. The pause signal is read
+from the pip directly, separately from the quote, which is what makes the states distinguishable;
+`quoteIsZero()` reports this one, `frozen()` the other, and `spotPrice()` reads zero in both.
+
 ## Why the linear cap rather than an EMA
 
 Curve's own `price_oracles/v2/ERC4626EMAWrapper.vy` smooths the upside with an exponential moving
@@ -171,13 +201,15 @@ oversight.
 | View | Use |
 |---|---|
 | `price()` | What the market sees. |
-| `spotPrice()` | The raw feed reading, or 0 if paused or unreadable. |
+| `spotPrice()` | The raw redemption quote, or 0 when paused, unreadable, or quoting zero — `frozen()` and `quoteIsZero()` tell those apart. |
 | `priceCeiling()` | The highest `price_w` could report right now. |
-| `frozen()` | True when the feed is unreadable and the price is held. |
-| `cachedPrice` / `cachedTimestamp` | The checkpoint the limit is measured from. |
+| `frozen()` | True when the feed is paused or unreadable and the price is held. |
+| `quoteIsZero()` | True when the feed is live but the quote is zero: the price is the one-wei floor. |
+| `cachedPrice` / `cachedTimestamp` | The anchor and checkpoint time the limit is measured from. |
 
-A persistent gap between `price()` and `spotPrice()` means the rate limit is binding. In ordinary
-operation it should not be, so that gap is the alarm to wire up.
+A persistent `price() < spotPrice()` means the rate limit is binding — that ordering is the exact
+signal, since a pause and a live-zero quote both read `spotPrice() == 0` with the price above it.
+In ordinary operation the limit should not bind, so that gap is the alarm to wire up.
 
 ## Adding a new wsgem
 

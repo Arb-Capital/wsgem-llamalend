@@ -34,7 +34,7 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
         wsgem   = new MockWsgem(address(gem), address(pip), 18);
         oracle  = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
         calc    = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
-        handler = new WsgemShimHandler(oracle, calc, pip);
+        handler = new WsgemShimHandler(oracle, calc, pip, wsgem);
 
         targetContract(address(handler));
     }
@@ -47,8 +47,11 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
         assertGt(handler.minReportedPrice(), 0);
     }
 
-    /// @notice The oracle never reports above the live feed.
-    /// @dev Under-valuing collateral is recoverable; over-valuing it is how bad debt is made.
+    /// @notice The oracle never reports above the live quote when there is one.
+    /// @dev Under-valuing collateral is recoverable; over-valuing it creates bad debt. The sole,
+    ///      wei-sized exception is intentional and outside this check's domain: a live feed
+    ///      quoting exactly zero is reported as one wei, and the handler's ghost reads that
+    ///      state as a zero spot and skips the comparison.
     function invariant_priceNeverExceedsSpot() public view {
         assertFalse(handler.overReported());
     }
@@ -63,7 +66,12 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
         assertEq(oracle.price_w(), p_);
     }
 
-    /// @notice The reported price never rises faster than the configured limit.
+    /// @notice The reported price never rises faster than the configured limit, measured from
+    ///         the last ANCHORED price.
+    /// @dev The one-wei live-zero floor is the sole exception by design: it is reported without
+    ///      being anchored, and recovery from it returns to the held anchor's ceiling in one
+    ///      step. That round trip through a failure state never raises the admissible maximum,
+    ///      which is why the ghost measures against the anchor.
     function invariant_upsideRateLimitHolds() public view {
         assertFalse(handler.rateLimitBreached());
     }
@@ -71,7 +79,9 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
     /// @notice The reported price never exceeds the ceiling the checkpoint implies.
     function invariant_priceRespectsItsOwnCeiling() public view {
         uint256 spot_ = oracle.spotPrice();
-        if (spot_ == 0) return; // frozen: reporting the cached price, ceiling does not apply
+        // Zero spot covers both failure states -- a pause holds the last report and a live-zero
+        // quote reports one wei -- and the ceiling applies to neither, only to QUOTE reports.
+        if (spot_ == 0) return;
         assertLe(oracle.price(), oracle.priceCeiling());
     }
 

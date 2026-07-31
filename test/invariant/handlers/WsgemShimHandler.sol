@@ -5,7 +5,7 @@ import {CommonBase}           from "forge-std/Base.sol";
 import {StdUtils}             from "forge-std/StdUtils.sol";
 import {WsgemLlamalendOracle} from "../../../src/WsgemLlamalendOracle.sol";
 import {WsgemRateCalculator}  from "../../../src/WsgemRateCalculator.sol";
-import {MockPip}              from "../../mocks/MockWsgem.sol";
+import {MockPip, MockWsgem}   from "../../mocks/MockWsgem.sol";
 
 /// @notice Drives the two shims through everything the live system can do to them.
 /// @dev The handler predicts every outcome, so `fail_on_revert = true` is meaningful: an
@@ -20,6 +20,7 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     WsgemLlamalendOracle public immutable ORACLE;
     WsgemRateCalculator public immutable CALC;
     MockPip public immutable PIP;
+    MockWsgem public immutable WSGEM;
 
     // --- Ghosts ------------------------------------------------------------------------------
 
@@ -44,10 +45,16 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     uint256 internal lastPrice;
     uint256 internal lastPriceTime;
 
-    constructor(WsgemLlamalendOracle oracle_, WsgemRateCalculator calc_, MockPip pip_) {
+    constructor(
+        WsgemLlamalendOracle oracle_,
+        WsgemRateCalculator calc_,
+        MockPip pip_,
+        MockWsgem wsgem_
+    ) {
         ORACLE        = oracle_;
         CALC          = calc_;
         PIP           = pip_;
+        WSGEM         = wsgem_;
         NAV0          = pip_.price();
         lastPrice     = oracle_.price();
         lastPriceTime = block.timestamp;
@@ -82,6 +89,13 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     /// @notice Pause the feed. Reads zero until poked again.
     function pause() public {
         PIP.poke(0);
+        _observe();
+    }
+
+    /// @notice Move the wrapper's redemption spread, the full settable range included: at 100%
+    ///         the quote is zero while the feed stays live, which is its own oracle state.
+    function setFee(uint256 fee_) public {
+        WSGEM.setFee(bound(fee_, 0, 1e18));
         _observe();
     }
 
@@ -126,10 +140,11 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     function _observe() internal {
         // A LONG_RETURN read succeeds -- the shims take the first word -- so the over-report
         // check must run against it too, not be skipped as if the feed were dark. The bombs and
-        // the short/reverting modes genuinely read as a pause.
+        // the short/reverting modes genuinely read as a pause. The oracle's spot is the
+        // redemption quote, so the ghost compares against `burncost()`, not the raw NAV.
         MockPip.Mode m_ = PIP.mode();
         bool readable_  = m_ == MockPip.Mode.NORMAL || m_ == MockPip.Mode.LONG_RETURN;
-        uint256 spot_   = readable_ ? PIP.price() : 0;
+        uint256 spot_   = readable_ ? WSGEM.burncost() : 0;
         uint256 p_      = ORACLE.price();
 
         if (p_ < minReportedPrice) minReportedPrice = p_;
@@ -158,7 +173,12 @@ contract WsgemShimHandler is CommonBase, StdUtils {
             if (!saturated_ && p_ > lastPrice + growth_) rateLimitBreached = true;
         }
 
-        lastPrice     = ORACLE.price();
+        // Mirror the production anchor rule: the one-wei live-zero floor is never a base for
+        // the rate limit, so the ghost only advances its anchor on a real quote (spot_ is zero
+        // during both a pause and a zero quote). Recovery from a 100% spread is the upside
+        // limit's sole, documented exception -- it returns to the held anchor's ceiling, so
+        // measuring against the anchor is the restated invariant, not a hole in it.
+        if (spot_ > 0) lastPrice = ORACLE.price();
         lastPriceTime = block.timestamp;
     }
 }

@@ -67,17 +67,20 @@ contract WsgemLlamalendForkTest is Test {
         assertGt(IWsgem(WSGEM).navprice(), 0, "the feed must be live at the pinned block");
     }
 
-    function test_theOracleReportsTheLiveNav() public view {
-        uint256 nav_ = IWsgem(WSGEM).navprice();
-        assertEq(oracle.price(), nav_, "a fresh oracle reports the live NAV exactly");
-        assertEq(oracle.spotPrice(), nav_);
+    function test_theOracleReportsTheLiveRedemptionQuote() public view {
+        uint256 quote_ = IWsgem(WSGEM).burncost();
+        assertGt(quote_, 0);
+        assertLe(quote_, IWsgem(WSGEM).navprice(), "the quote sits at or below the NAV");
+        assertEq(oracle.price(), quote_, "a fresh oracle reports the live quote exactly");
+        assertEq(oracle.spotPrice(), quote_);
     }
 
-    function test_theOracleReadsThePipDirectlyAndIdenticallyToTheWrapper() public view {
-        // The shim caches `pip` at construction instead of hopping through the wrapper. That is
-        // only sound if the two agree, which is what this pins.
+    function test_theOracleWiringMatchesTheWrapper() public view {
+        // The cached pip is the wiring reference the deploy script checks; the price itself
+        // routes through the wrapper's `burncost()`, and the calculator reads the pip directly.
         assertEq(address(oracle.PIP()), IWsgem(WSGEM).pip());
         assertEq(IPip(address(oracle.PIP())).read(), IWsgem(WSGEM).navprice());
+        assertEq(oracle.price(), IWsgem(WSGEM).burncost());
     }
 
     function test_theFactoryPriceCheckPassesAgainstTheLiveFeed() public {

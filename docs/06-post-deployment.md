@@ -20,7 +20,7 @@ cast call $FACTORY "markets(uint256)" $ID --rpc-url $ETH_RPC_URL
 | Claim | How it is checked |
 |---|---|
 | The triplet is the factory's own | `markets(id)` returns your three addresses |
-| Oracle is sane | `price()` equals live NAV; `price()` == `price_w()`; `frozen()` false |
+| Oracle is sane | `price()` equals the live redemption quote (`burncost()`); `price()` == `price_w()`; `frozen()` and `quoteIsZero()` false |
 | Oracle is ownerless | Verified source; no owner, ward or setter |
 | Policy is Curve's own code | Runtime bytecode identical to Curve's live sDOLA policy — [PROVENANCE.md](../script/bytecode/PROVENANCE.md) |
 | Policy is bound to this market | `MP.CONTROLLER()` == this controller |
@@ -60,9 +60,10 @@ The proposal should carry the reasoning as well as the addresses:
 
 - The pair, and that it is like-kind — the collateral is a wrapper over the borrowed token.
 - **The NAV is published weekly by a permissioned key and can be paused to zero.** This is the
-  market's central risk. The mitigation is that the oracle bounds it — up-moves rate-limited to
-  0.25%/day at a measured cost of ~0.11 bp, down-moves immediate, a pause freezes rather than
-  zeroes. See [02-oracle-shim.md](02-oracle-shim.md).
+  market's central risk. The mitigation is that the oracle bounds it — the reported price is the
+  redemption quote (`burncost`, the executable floor), up-moves rate-limited to 0.25%/day at a
+  measured cost of ~0.11 bp, down-moves immediate, a pause freezes rather than zeroes. See
+  [02-oracle-shim.md](02-oracle-shim.md).
 - **Redemption is atomic, against the full supply, and slippage-free**, so liquidator depth is not a
   risk variable — an exit always exists at a known price.
 - Why the parameters, especially that `liquidation_discount` clears the redemption spread.

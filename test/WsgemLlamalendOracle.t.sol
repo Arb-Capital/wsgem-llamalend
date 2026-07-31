@@ -283,9 +283,139 @@ contract WsgemLlamalendOracleTest is Test {
         assertGt(oracle.price(), 0);
     }
 
+    // --- The redemption quote ----------------------------------------------------------------
+
+    function test_priceIsTheRedemptionQuoteNotTheNav() public {
+        // The live wrapper's shape: a 25 bp redemption spread below the NAV.
+        wsgem.setFee(0.0025e18);
+        uint256 quote_ = (NAV0 * (WAD - 0.0025e18)) / WAD;
+
+        // A spread appearing is a downward move and passes through immediately: the executable
+        // floor genuinely dropped.
+        assertEq(oracle.price(), quote_, "the oracle reports burncost, not the NAV");
+        assertEq(oracle.spotPrice(), quote_);
+        oracle.price_w();
+
+        // A spread cut is an upward move, rate-limited like any other.
+        wsgem.setFee(0);
+        assertEq(oracle.price(), quote_, "a spread cut cannot jump the price");
+        skip(26 hours);
+        oracle.price_w();
+        assertEq(oracle.price(), NAV0, "it arrives at the configured speed");
+    }
+
+    function test_constructorCheckpointsTheQuoteNotTheNav() public {
+        wsgem.setFee(0.0025e18);
+        WsgemLlamalendOracle o_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
+        assertEq(o_.price(), (NAV0 * (WAD - 0.0025e18)) / WAD);
+    }
+
+    function test_constructorRejectsAZeroQuote() public {
+        // A live feed with a 100% spread is not a pause, and not a price to build a market on.
+        wsgem.setFee(1e18);
+        vm.expectRevert(WsgemLlamalendOracle.QuoteIsZero.selector);
+        new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
+    }
+
+    function test_aHundredPercentSpreadReportsOneWeiNotTheOldPrice() public {
+        oracle.price_w();
+
+        // The wrapper's settable maximum: the quote is zero while the feed stays live. Freezing
+        // here would keep borrowing open against collateral that redemption values at nothing.
+        wsgem.setFee(1e18);
+        assertEq(oracle.price(), 1, "a live zero quote reports one wei, not the old price");
+        assertEq(oracle.price_w(), 1);
+        assertFalse(oracle.frozen(), "this is not a pause");
+        assertTrue(oracle.quoteIsZero());
+        assertEq(oracle.spotPrice(), 0, "the raw quote is truthfully zero");
+        assertEq(oracle.cachedPrice(), NAV0, "the floor is never anchored");
+
+        // Restoration recovers from the last real anchor, not from one wei. This is the upside
+        // limit's sole exception, and it cannot raise the price above the anchor's own ceiling.
+        wsgem.setFee(0.0025e18);
+        assertEq(
+            oracle.price(),
+            (NAV0 * (WAD - 0.0025e18)) / WAD,
+            "recovery is from the anchor, not from dust"
+        );
+        assertFalse(oracle.quoteIsZero());
+    }
+
+    function test_constructorAcceptsAGenuineOneWeiQuote() public {
+        pip.poke(1);
+        WsgemLlamalendOracle o_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
+        assertEq(o_.price(), 1, "one wei is a price, not the zero-quote state");
+        assertFalse(o_.quoteIsZero());
+    }
+
+    function test_theZeroQuoteTransitionsAreEventedExactlyOnce() public {
+        wsgem.setFee(1e18);
+        skip(30 days);
+
+        // Entering the floor is evented once, with the held anchor...
+        vm.expectEmit(true, false, false, true, address(oracle));
+        emit QuoteZeroed(NAV0);
+        oracle.price_w();
+
+        // ...and repeated traffic through the state is silent.
+        vm.recordLogs();
+        oracle.price_w();
+        oracle.price_w();
+        assertEq(vm.getRecordedLogs().length, 0, "the state is evented on transition, not per call");
+
+        // Leaving is evented with the price reported on the way out.
+        wsgem.setFee(0);
+        vm.expectEmit(true, false, false, true, address(oracle));
+        emit QuoteRestored(NAV0);
+        oracle.price_w();
+
+        // And no allowance banked across the episode.
+        pip.poke(NAV0 * 10);
+        skip(1 days);
+        assertApproxEqRel(
+            oracle.price(),
+            (NAV0 * 10_025) / 10_000,
+            1e12,
+            "no allowance may bank across a zero-quote period"
+        );
+    }
+
+    function test_pausedAndLiveZeroAreDistinctStates() public {
+        pip.poke(0);
+        assertTrue(oracle.frozen());
+        assertFalse(oracle.quoteIsZero());
+        assertEq(oracle.price(), NAV0, "a pause holds the last price");
+
+        pip.poke(NAV0);
+        wsgem.setFee(1e18);
+        assertFalse(oracle.frozen());
+        assertTrue(oracle.quoteIsZero());
+        assertEq(oracle.price(), 1, "a live zero floors the price instead");
+    }
+
+    function test_aPauseAfterAWitnessedZeroQuoteHoldsTheFloor() public {
+        // The freeze rule is "hold the last report". If the last report was the one-wei floor,
+        // a pause must keep holding the floor -- snapping back to the anchor while the feed is
+        // dark would re-value worthless collateral on no information.
+        wsgem.setFee(1e18);
+        oracle.price_w(); // the floor is witnessed and flagged
+
+        pip.poke(0);
+        assertTrue(oracle.frozen());
+        assertEq(oracle.price(), 1, "a freeze holds the floor it last reported");
+        assertEq(oracle.price_w(), 1);
+
+        // The feed returns healthy: the anchor was kept, so recovery is immediate.
+        pip.poke(NAV0);
+        wsgem.setFee(0);
+        assertEq(oracle.price(), NAV0);
+    }
+
     // --- Events ----------------------------------------------------------------------------------
 
     event PriceUpdated(uint256 indexed price, uint256 indexed spot);
+    event QuoteZeroed(uint256 indexed anchor);
+    event QuoteRestored(uint256 indexed price);
 
     function test_priceWEmitsTheReportedPriceWithTheRawSpotAlongside() public {
         pip.poke(NAV0 * 10);

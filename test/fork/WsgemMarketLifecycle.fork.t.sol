@@ -24,6 +24,25 @@ interface IAMMExchange {
         returns (uint256[2] memory);
 }
 
+/// @dev The wrapper's redemption surface, declared here for the payout-identity test only: the
+///      shims never call any of it.
+interface IWsgemRedeem {
+    function redeem(uint256 amt) external returns (uint256 id);
+
+    function canPass(address usr) external view returns (bool);
+
+    function burnable() external view returns (bool);
+
+    function cooldown() external view returns (uint256);
+
+    function totalPending() external view returns (uint256);
+}
+
+/// @dev The wrapper's spread-setting surface, pranked as its ward in the zero-quote test.
+interface IActFile {
+    function setBpsout(uint256 bpsout_) external;
+}
+
 /// @notice The whole life of a market against live mainnet state: lend, borrow, accrue, repay,
 ///         withdraw, liquidate, and survive a mid-life feed pause.
 /// @dev The creation-time fork suite proves a market can be BUILT; this one proves the market
@@ -214,10 +233,12 @@ contract WsgemMarketLifecycleForkTest is Test {
         vm.stopPrank();
         assertGt(controller.health(borrower, true), 0);
 
-        // The collapse: -10% in one publication, passed through undamped.
+        // The collapse: -10% in one publication, passed through undamped. The oracle reports the
+        // redemption quote of the fallen NAV, read live through the wrapper.
         uint256 lower_ = (IWsgem(WSGEM).navprice() * 90) / 100;
         _setNav(lower_);
-        assertEq(oracle.price(), lower_, "a fall reaches the market in the same block");
+        assertEq(oracle.price(), IWsgem(WSGEM).burncost(), "a fall reaches the market in the same block");
+        assertLt(oracle.price(), lower_, "and the quote sits below the fallen NAV");
         assertLt(controller.health(borrower, true), 0, "a 95%-of-max loan must be under water");
 
         // Hard liquidation clears it.
@@ -239,6 +260,7 @@ contract WsgemMarketLifecycleForkTest is Test {
     function test_aMidLifeFreezeKeepsTheMarketServiceable() public {
         _lendAndBorrow(borrower, COLLATERAL, 0);
         uint256 held_ = oracle.price();
+        uint256 nav_  = IWsgem(WSGEM).navprice();
 
         // The feed pauses with a position open.
         vm.mockCall(IWsgem(WSGEM).pip(), abi.encodeCall(IPip.read, ()), abi.encode(uint256(0)));
@@ -256,9 +278,9 @@ contract WsgemMarketLifecycleForkTest is Test {
         assertTrue(controller.loan_exists(borrower));
 
         // The feed returns lower: the fall passes through in one block, as designed.
-        uint256 lower_ = (held_ * 95) / 100;
-        _setNav(lower_);
-        assertEq(oracle.price(), lower_);
+        _setNav((nav_ * 95) / 100);
+        assertEq(oracle.price(), IWsgem(WSGEM).burncost());
+        assertLt(oracle.price(), held_);
     }
 
     // --- The Configurator levers an incident depends on --------------------------------------------
@@ -359,20 +381,91 @@ contract WsgemMarketLifecycleForkTest is Test {
         );
     }
 
-    /// @dev Feeds `PIP_READ_GAS`: the live feed read must cost no more than a tenth of the cap,
-    ///      so a legitimate proxy upgrade has an order of magnitude of headroom before it starts
-    ///      reading as a pause.
-    function test_theLivePipReadCostsFarBelowTheGasCap() public view {
+    /// @dev The claim the floor-price design rests on, executed rather than quoted: redeeming N
+    ///      wsgem pays exactly N * burncost / 1e18 in gem, through the real path -- compliance
+    ///      gate, burn window, zero cooldown -- at the pinned block. This is what licenses
+    ///      "price() is the executable floor".
+    function test_redemptionPaysExactlyTheReportedPrice() public {
+        IWsgemRedeem w_ = IWsgemRedeem(WSGEM);
+        assertTrue(w_.canPass(borrower), "the compliance gate admits an arbitrary address");
+        assertTrue(w_.burnable(), "the burn window is open at the pinned block");
+        assertEq(w_.cooldown(), 0, "zero cooldown: redemption settles in the transaction");
+
+        uint256 amt_   = 100e18;
+        uint256 quote_ = IWsgem(WSGEM).burncost();
+        assertEq(oracle.price(), quote_);
+
+        uint256 before_ = IERC20(GEM).balanceOf(borrower);
+        vm.prank(borrower);
+        w_.redeem(amt_);
+
+        assertEq(
+            IERC20(GEM).balanceOf(borrower) - before_,
+            (amt_ * quote_) / 1e18,
+            "redemption pays exactly price() per wsgem"
+        );
+    }
+
+    /// @dev The wrapper's spread is settable to 100% -- the live act accepts `bpsout == 10_000`
+    ///      -- which zeroes `burncost()` while the feed stays live. That must read as a one-wei
+    ///      floor, not as a pause holding the old price, and restoring the spread must recover
+    ///      the last real anchor. Exercised against the live act, pranked as its ward.
+    function test_aHundredPercentSpreadFloorsThePriceAndRecovers() public {
+        address act_    = IWsgem(WSGEM).act();
+        address ward_   = 0xa73c94969dE90Edb159D29922C42fF24beDFA085;
+        uint256 anchor_ = oracle.price_w();
+
+        vm.prank(ward_);
+        IActFile(act_).setBpsout(10_000);
+
+        assertEq(IWsgem(WSGEM).burncost(), 0, "the live wrapper quotes zero at a 100% spread");
+        assertEq(oracle.price(), 1, "a live zero floors the price at one wei");
+        assertEq(oracle.price_w(), 1);
+        assertFalse(oracle.frozen(), "this is not a pause");
+        assertTrue(oracle.quoteIsZero());
+
+        vm.prank(ward_);
+        IActFile(act_).setBpsout(25);
+
+        assertEq(oracle.price(), anchor_, "restoration recovers the anchor exactly");
+        assertFalse(oracle.quoteIsZero());
+    }
+
+    /// @dev The "against the full supply" claim, asserted rather than sampled: at the pinned
+    ///      block the wrapper's gem reserves cover every outstanding wsgem redeeming at the
+    ///      current quote, plus claims already pending settlement. The redemption test above
+    ///      proves the price; this proves the depth.
+    function test_reservesCoverAFullSupplyExitAtTheQuote() public view {
+        uint256 owed_ = (IERC20(WSGEM).totalSupply() * IWsgem(WSGEM).burncost()) / 1e18
+            + IWsgemRedeem(WSGEM).totalPending();
+        assertGe(
+            IERC20(GEM).balanceOf(WSGEM),
+            owed_,
+            "reserves must cover a full-supply exit at the quote plus pending claims"
+        );
+    }
+
+    /// @dev Feeds `PIP_READ_GAS`: each of the two reads the oracle makes -- the pip's NAV for
+    ///      the pause signal and the wrapper's `burncost()` for the price -- must cost no more
+    ///      than a tenth of the cap, so a legitimate proxy upgrade has an order of magnitude of
+    ///      headroom before it starts reading as a pause.
+    function test_theLiveReadsCostFarBelowTheGasCap() public view {
         address pip_ = IWsgem(WSGEM).pip();
 
-        // Warm the account the way a live call path would have it.
+        // Warm the accounts the way a live call path would have them.
         IPip(pip_).read();
+        IWsgem(WSGEM).burncost();
 
         uint256 g0_ = gasleft();
         IPip(pip_).read();
-        uint256 used_ = g0_ - gasleft();
+        uint256 navRead_ = g0_ - gasleft();
 
-        assertLt(used_ * 10, oracle.PIP_READ_GAS(), "the cap must be >= 10x the live read cost");
+        g0_ = gasleft();
+        IWsgem(WSGEM).burncost();
+        uint256 quoteRead_ = g0_ - gasleft();
+
+        assertLt(navRead_ * 10, oracle.PIP_READ_GAS(), "cap must be >= 10x the NAV read");
+        assertLt(quoteRead_ * 10, oracle.PIP_READ_GAS(), "cap must be >= 10x the quote read");
     }
 
     // --- Helpers ------------------------------------------------------------------------------------

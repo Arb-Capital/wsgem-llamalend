@@ -81,10 +81,17 @@ contract MockGem {
 ///      to cache `pip` at construction. They are immutable here too so a test cannot accidentally
 ///      rely on behaviour the real token does not have.
 contract MockWsgem {
+    uint256 internal constant WAD = 1e18;
+
     address public immutable gem;
     address public immutable pip;
     address public immutable act;
     uint8 public immutable decimals;
+
+    /// @notice Redemption spread, WAD-scaled. Zero by default so price expectations stay exact;
+    ///         tests that exercise the spread set it explicitly. The real wrapper's spread is
+    ///         adjustable too, though not in normal operation.
+    uint256 public fee;
 
     constructor(address gem_, address pip_, uint8 decimals_) {
         gem = gem_;
@@ -93,7 +100,37 @@ contract MockWsgem {
         decimals = decimals_;
     }
 
+    function setFee(uint256 fee_) external {
+        fee = fee_;
+    }
+
     function navprice() external view returns (uint256) {
         return MockPip(pip).read();
+    }
+
+    /// @notice What one wsgem redeems for: the NAV net of the spread.
+    /// @dev Reads the pip raw and replays a short return as a short return, rather than making a
+    ///      typed call that would fold it into a revert -- so the oracle's own returndata-length
+    ///      guard stays reachable from the suite. Every other feed failure mode arrives in its
+    ///      natural shape: a revert propagates, and the bombs exhaust the forwarded gas here.
+    function burncost() external view returns (uint256) {
+        (bool ok_, bytes memory ret_) = pip.staticcall(abi.encodeWithSignature("read()"));
+        require(ok_, "wsgem: pip unreadable");
+        if (ret_.length < 32) {
+            assembly ("memory-safe") {
+                return(add(ret_, 0x20), mload(ret_))
+            }
+        }
+
+        // Overflow-safe: the suite deliberately drives the NAV into regions where `nav * WAD`
+        // wraps. With no spread the quote IS the NAV, exactly; at a 100% spread it is zero, like
+        // the live wrapper's; with one in between, fall back to a divide-first order out where a
+        // wei of rounding is beneath notice.
+        uint256 nav_  = abi.decode(ret_, (uint256));
+        uint256 keep_ = WAD - fee;
+        if (keep_ == WAD) return nav_;
+        if (keep_ == 0) return 0;
+        if (nav_ > type(uint256).max / keep_) return (nav_ / WAD) * keep_;
+        return (nav_ * keep_) / WAD;
     }
 }
