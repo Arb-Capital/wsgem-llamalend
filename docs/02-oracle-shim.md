@@ -63,7 +63,8 @@ it at creation, and an AMM that sees a zero mid-market prices every position to 
 The shim returns the last good price instead. A reverting or short-returning feed — the same
 failure with a different shape after a proxy upgrade — is folded into the same path. So is a feed
 that tries to burn gas or return an oversized payload: the read forwards at most `PIP_READ_GAS`
-(250k, more than an order of magnitude above the live feed's measured cost) and copies exactly one
+(300k, more than an order of magnitude above the live quote's measured ~26.5k cost through the
+wrapper's three-hop read) and copies exactly one
 word back, so even a hostile proxy implementation cannot make `price()` revert with an
 out-of-gas. An implementation that legitimately outgrows the cap reads as a pause, which
 `frozen()` alarms.
@@ -176,8 +177,12 @@ ceiling already allowed; the limit's invariant is stated against the last *ancho
 exactly this reason. Entering and leaving the state emit `QuoteZeroed(anchor)` and
 `QuoteRestored(price)`, once per transition. A pause that follows a witnessed zero quote keeps
 holding the floor — a freeze preserves the last report, whatever it was. The pause signal is read
-from the pip directly, separately from the quote, which is what makes the states distinguishable;
-`quoteIsZero()` reports this one, `frozen()` the other, and `spotPrice()` reads zero in both.
+from the pip directly, separately from the quote, which is what makes the states distinguishable —
+and deliberately so: a nonzero quote is *not* taken as proof the feed is live, because the quote's
+last hop (`burncost()` is `Act.burncost(Pip.read())`) sits behind an upgradeable proxy of its own,
+and a broken or hostile Act implementation could quote a price over a paused feed. Only the pip is
+the pause authority. `quoteIsZero()` reports this state, `frozen()` the other, and `spotPrice()`
+reads zero in both.
 
 ## Why the linear cap rather than an EMA
 
@@ -201,7 +206,7 @@ oversight.
 | View | Use |
 |---|---|
 | `price()` | What the market sees. |
-| `spotPrice()` | The raw redemption quote, or 0 when paused, unreadable, or quoting zero — `frozen()` and `quoteIsZero()` tell those apart. |
+| `spotPrice()` | The raw redemption quote (saturated at 2^208−1), or 0 when paused, unreadable, or quoting zero — `frozen()` and `quoteIsZero()` tell those apart. |
 | `priceCeiling()` | The highest `price_w` could report right now. |
 | `frozen()` | True when the feed is paused or unreadable and the price is held. |
 | `quoteIsZero()` | True when the feed is live but the quote is zero: the price is the one-wei floor. |

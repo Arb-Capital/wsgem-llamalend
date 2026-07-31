@@ -1,0 +1,11 @@
+{
+  "calc.rate cold": "8395",
+  "calc.rate_w checkpoint": "37348",
+  "calc.rate_w steady": "16153",
+  "oracle.price cold": "17006",
+  "oracle.price frozen": "5558",
+  "oracle.price warm": "4006",
+  "oracle.price_w frozen": "8740",
+  "oracle.price_w publication": "17795",
+  "oracle.price_w steady": "22295"
+}

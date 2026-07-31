@@ -15,8 +15,8 @@ interface IDecimals {
 /// @notice Ownerless Curve Llamalend V2 price oracle for a wsgem/gem market: reports the
 ///         redemption price of one wsgem in gem -- the wrapper's `burncost()` -- scaled by 1e18.
 /// @dev There is no owner, no ward, no setter and no upgrade path. Every parameter is `immutable`,
-///      set once at construction. The only mutable state is three words: the rate-limit anchor,
-///      its checkpoint time, and the live-zero flag.
+///      set once at construction. The only mutable state is a single storage word: the rate-limit
+///      anchor packed with its checkpoint time and the live-zero flag.
 ///      This is deliberate: the wsgem's NAV is already a single storage slot behind a single key,
 ///      and the point of this shim is to stand between that and a lending market -- not to add a
 ///      second discretionary party on top of it.
@@ -99,11 +99,13 @@ contract WsgemLlamalendOracle is IPriceOracle {
     /// @notice Upper bound on the gas forwarded to the feed on each of the two reads.
     /// @dev The pip sits behind an upgradeable proxy, so a hostile or broken implementation could
     ///      otherwise burn the transaction's whole gas allowance -- the one way `price()` could
-    ///      still fail after a plain revert has been folded into a freeze. A live read costs on
-    ///      the order of ten thousand gas (measured in the fork suite), so this is more than an
-    ///      order of magnitude of headroom for a legitimate proxy upgrade; an implementation that
-    ///      exceeds it reads as paused, which is the freeze path and alarmed by `frozen()`.
-    uint256 public constant PIP_READ_GAS = 250_000;
+    ///      still fail after a plain revert has been folded into a freeze. The quote is a
+    ///      three-hop read (wsgem, act, pip) costing on the order of twenty-five thousand gas
+    ///      live (measured in the fork suite), so this keeps an order of magnitude of headroom
+    ///      for a legitimate proxy upgrade; an implementation that exceeds it reads as paused,
+    ///      which is the freeze path and alarmed by `frozen()`. Higher than the rate
+    ///      calculator's cap because that contract reads the pip raw, one hop.
+    uint256 public constant PIP_READ_GAS = 300_000;
 
     /// @notice What a live feed with a zero redemption quote is reported as: one wei.
     /// @dev The wrapper's spread is settable to 100%, which makes `burncost()` zero while the NAV
@@ -148,15 +150,20 @@ contract WsgemLlamalendOracle is IPriceOracle {
     uint256 public immutable MAX_UPSIDE_SPEED;
 
     // --- Storage -----------------------------------------------------------------------------
+    // One slot, exactly: 208 + 40 + 8 bits. The AMM reads this oracle inside every user
+    // operation, so anchor, checkpoint time and flag cost one cold SLOAD together, not three.
 
     /// @notice The rate-limit anchor: the last QUOTE-state price `price_w` persisted. Never zero
     ///         after construction. During a live-zero episode the report is one wei while this
     ///         holds the recovery anchor, so it is not always the last reported price.
-    uint256 public cachedPrice;
+    /// @dev Wide enough for any quote that is not already nonsense (2.6e62 in WAD) -- the same
+    ///      bound the rate calculator stores its NAVs at. `_spot` saturates the quote to fit.
+    uint208 public cachedPrice;
 
     /// @notice When the checkpoint was last touched. Refreshed by every `price_w`, freezes and
     ///         live-zero reports included, so no upside allowance accrues through either.
-    uint256 public cachedTimestamp;
+    /// @dev uint40 holds `block.timestamp` until the year 36,812.
+    uint40 public cachedTimestamp;
 
     /// @notice Whether the last `price_w` report was the one-wei live-zero floor.
     /// @dev What lets a subsequent pause hold the floor rather than snapping back to the anchor,
@@ -213,8 +220,8 @@ contract WsgemLlamalendOracle is IPriceOracle {
         if (state_ == Spot.PAUSED) revert OraclePaused();
         if (state_ == Spot.LIVE_ZERO) revert QuoteIsZero();
 
-        cachedPrice     = spot_;
-        cachedTimestamp = block.timestamp;
+        cachedPrice     = _toUint208(spot_); // already saturated by _spot; the clamp is free
+        cachedTimestamp = uint40(block.timestamp);
 
         emit PriceUpdated(spot_, spot_);
     }
@@ -241,7 +248,7 @@ contract WsgemLlamalendOracle is IPriceOracle {
         // Always refresh the timestamp, including through a freeze. The rate limit measures time
         // since the last REPORTED price, and a freeze is a report of the same value -- letting
         // allowance accrue across a pause would hand the feed a free jump on the way out.
-        cachedTimestamp = block.timestamp;
+        cachedTimestamp = uint40(block.timestamp);
 
         if (state_ == Spot.LIVE_ZERO) {
             // The floor is reported but never anchored: it is a failure state, not a price to
@@ -258,7 +265,7 @@ contract WsgemLlamalendOracle is IPriceOracle {
                 emit QuoteRestored(price_);
             }
             if (price_ != cachedPrice) {
-                cachedPrice = price_;
+                cachedPrice = _toUint208(price_); // ≤ min(spot, ceiling), spot already saturated
                 emit PriceUpdated(price_, spot_);
             }
         }
@@ -270,9 +277,9 @@ contract WsgemLlamalendOracle is IPriceOracle {
 
     // --- Views -------------------------------------------------------------------------------
 
-    /// @notice The wrapper's live redemption quote, undamped. Zero when the feed is paused or
-    ///         unreadable AND when the live quote is genuinely zero -- `frozen()` and
-    ///         `quoteIsZero()` tell the two apart.
+    /// @notice The wrapper's live redemption quote, undamped, saturated at `type(uint208).max`.
+    ///         Zero when the feed is paused or unreadable AND when the live quote is genuinely
+    ///         zero -- `frozen()` and `quoteIsZero()` tell the two apart.
     /// @dev For monitoring: a persistent `price() < spotPrice()` means the rate limit is
     ///      binding, which in ordinary operation it should not be. That ordering is the exact
     ///      signal -- both failure states read zero here with the price above it.
@@ -307,11 +314,18 @@ contract WsgemLlamalendOracle is IPriceOracle {
 
     /// @notice What the feed currently resolves to, with the quote alongside when there is one.
     /// @dev The NAV is the pause signal -- the feed publishes zero to pause, and an unreadable
-    ///      feed is the same state with a different shape. Reading it separately from the quote
-    ///      is what distinguishes "the feed is dark, hold the last report" from "the feed is
-    ///      live and the floor is genuinely nothing", which are different failures with
-    ///      different correct responses. A genuine one-wei quote is a QUOTE like any other; the
-    ///      state, not a reserved price value, is what carries the distinction.
+    ///      feed is the same state with a different shape. It is read first, and no quote is
+    ///      accepted without it. Skipping it on a nonzero quote would save one external read,
+    ///      but the quote's own last hop (`burncost()` is `Act.burncost(Pip.read())`) sits
+    ///      behind an upgradeable proxy of its own: a broken or hostile Act implementation
+    ///      could quote a nonzero price over a paused feed, and only the pip itself is the
+    ///      pause authority. Reading the NAV separately from the quote is also what
+    ///      distinguishes "the feed is dark, hold the last report" from "the feed is live and
+    ///      the floor is genuinely nothing", which are different failures with different
+    ///      correct responses. A genuine one-wei quote is a QUOTE like any other; the state,
+    ///      not a reserved price value, is what carries the distinction. The quote is
+    ///      saturated at `type(uint208).max` -- past 2.6e62 in WAD it is not a price -- which
+    ///      is what lets the anchor share one storage slot with its checkpoint.
     function _spot() internal view returns (Spot state_, uint256 quote_) {
         (bool okNav_, uint256 nav_) = _readWord(address(PIP), abi.encodeCall(IPip.read, ()));
         if (!okNav_ || nav_ == 0) return (Spot.PAUSED, 0);
@@ -321,7 +335,7 @@ contract WsgemLlamalendOracle is IPriceOracle {
         if (!okQuote_) return (Spot.PAUSED, 0);
 
         if (quote_ == 0) return (Spot.LIVE_ZERO, 0);
-        return (Spot.QUOTE, quote_);
+        return (Spot.QUOTE, uint256(_toUint208(quote_)));
     }
 
     /// @dev Gas-capped, one-word staticcall: a revert, a short return, a gas burn or an
@@ -359,7 +373,10 @@ contract WsgemLlamalendOracle is IPriceOracle {
     /// @notice `cachedPrice` grown by `MAX_UPSIDE_SPEED` over the elapsed time, capped.
     /// @dev Saturating rather than reverting on overflow. A revert here would propagate into every
     ///      AMM read and brick the market -- and saturation is harmless, because the result is only
-    ///      ever used as an upper bound on the feed reading.
+    ///      ever used as an upper bound on the feed reading. With the anchor saturated at uint208
+    ///      the addition below cannot overflow (the sum tops out near 7e64), so its guard is
+    ///      unreachable -- kept anyway: this block is unchecked, and the guard is the only net if
+    ///      the anchor's type is ever widened.
     function _ceiling() internal view returns (uint256) {
         uint256 cached_  = cachedPrice;
         uint256 elapsed_ = block.timestamp - cachedTimestamp;
@@ -376,5 +393,13 @@ contract WsgemLlamalendOracle is IPriceOracle {
             if (sum_ < cached_) return type(uint256).max;
             return sum_;
         }
+    }
+
+    /// @dev Saturating, not truncating -- the same clamp the rate calculator applies to what it
+    ///      stores, for the same reason: a reading past 2.6e62 in WAD is already nonsense, and
+    ///      saturating keeps it from wrapping to a small number that would read as a collapse.
+    function _toUint208(uint256 x_) internal pure returns (uint208) {
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return x_ > type(uint208).max ? type(uint208).max : uint208(x_);
     }
 }

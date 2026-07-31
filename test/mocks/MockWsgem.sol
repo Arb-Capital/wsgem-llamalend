@@ -91,7 +91,16 @@ contract MockWsgem {
     /// @notice Redemption spread, WAD-scaled. Zero by default so price expectations stay exact;
     ///         tests that exercise the spread set it explicitly. The real wrapper's spread is
     ///         adjustable too, though not in normal operation.
-    uint256 public fee;
+    /// @dev Packed beside `quoteOverride` so the override check adds one warm, not one cold,
+    ///      SLOAD to `burncost()` relative to the real wrapper -- keeps the gas bench honest.
+    uint128 public fee;
+
+    /// @notice When nonzero, `burncost()` returns this outright, without reading the pip.
+    /// @dev Models an Act implementation swap that quotes a price the pip never published --
+    ///      the quote's last hop is an upgradeable proxy on the live system, so a quote that
+    ///      diverges from the pause signal is reachable there. The oracle must treat the pip,
+    ///      not the quote, as the pause authority; see the test that pins that decision.
+    uint128 public quoteOverride;
 
     constructor(address gem_, address pip_, uint8 decimals_) {
         gem = gem_;
@@ -101,7 +110,15 @@ contract MockWsgem {
     }
 
     function setFee(uint256 fee_) external {
-        fee = fee_;
+        // casting to 'uint128' is safe because the spread is at most WAD
+        // forge-lint: disable-next-line(unsafe-typecast)
+        fee = uint128(fee_);
+    }
+
+    function setQuoteOverride(uint256 quote_) external {
+        // casting to 'uint128' is safe because tests override with NAV-scale values
+        // forge-lint: disable-next-line(unsafe-typecast)
+        quoteOverride = uint128(quote_);
     }
 
     function navprice() external view returns (uint256) {
@@ -114,6 +131,8 @@ contract MockWsgem {
     ///      guard stays reachable from the suite. Every other feed failure mode arrives in its
     ///      natural shape: a revert propagates, and the bombs exhaust the forwarded gas here.
     function burncost() external view returns (uint256) {
+        if (quoteOverride != 0) return quoteOverride;
+
         (bool ok_, bytes memory ret_) = pip.staticcall(abi.encodeWithSignature("read()"));
         require(ok_, "wsgem: pip unreadable");
         if (ret_.length < 32) {

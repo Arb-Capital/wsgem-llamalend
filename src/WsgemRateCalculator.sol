@@ -68,7 +68,9 @@ contract WsgemRateCalculator is IRateCalculator {
     ///      proxy, and this contract is called from inside every borrow, repay and liquidation, so
     ///      a hostile implementation must not be able to burn the transaction's gas or return an
     ///      enormous payload. A live read costs on the order of ten thousand gas (measured in the
-    ///      fork suite); an implementation that exceeds the cap reads as paused.
+    ///      fork suite); an implementation that exceeds the cap reads as paused. Lower than the
+    ///      oracle's cap: this contract reads the pip raw, one hop, where the oracle's quote read
+    ///      goes through the wrapper.
     uint256 public constant PIP_READ_GAS = 250_000;
 
     // --- Immutables --------------------------------------------------------------------------
@@ -101,8 +103,11 @@ contract WsgemRateCalculator is IRateCalculator {
 
     Checkpoint[SLOTS] internal _ring;
 
-    uint256 internal _head;
-    uint256 internal _filled;
+    /// @dev Ring cursor and fill count, both bounded by `SLOTS`, packed into one slot: this
+    ///      contract is read inside every borrow, repay and liquidation, and together they cost
+    ///      one cold SLOAD instead of two.
+    uint128 internal _head;
+    uint128 internal _filled;
 
     // --- Errors ------------------------------------------------------------------------------
 
@@ -245,7 +250,9 @@ contract WsgemRateCalculator is IRateCalculator {
 
         uint256 next_ = (head_ + 1) % SLOTS;
         _ring[next_]  = Checkpoint({nav: _toUint208(spot_), timestamp: uint48(block.timestamp)});
-        _head         = next_;
+        // casting to 'uint128' is safe because next_ < SLOTS
+        // forge-lint: disable-next-line(unsafe-typecast)
+        _head         = uint128(next_);
         if (_filled < SLOTS) _filled += 1;
 
         emit Checkpointed(spot_, next_);

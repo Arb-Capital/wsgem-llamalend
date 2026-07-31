@@ -230,7 +230,11 @@ contract WsgemLlamalendOracleTest is Test {
 
         assertEq(p_, NAV0, "a gas-burning pip is a pause with a different shape");
         assertTrue(oracle.frozen());
-        assertLt(used_, 300_000, "the read must never forward more than PIP_READ_GAS to the feed");
+        assertLt(
+            used_,
+            oracle.PIP_READ_GAS() + 50_000,
+            "the read must never forward more than PIP_READ_GAS to the feed"
+        );
         assertEq(oracle.price_w(), NAV0);
     }
 
@@ -245,7 +249,11 @@ contract WsgemLlamalendOracleTest is Test {
 
         assertEq(p_, NAV0, "a payload too large to build under the cap reads as a pause");
         assertTrue(oracle.frozen());
-        assertLt(used_, 300_000, "the caller must never pay for an oversized payload");
+        assertLt(
+            used_,
+            oracle.PIP_READ_GAS() + 50_000,
+            "the caller must never pay for an oversized payload"
+        );
         assertEq(oracle.price_w(), NAV0);
     }
 
@@ -408,6 +416,26 @@ contract WsgemLlamalendOracleTest is Test {
         // The feed returns healthy: the anchor was kept, so recovery is immediate.
         pip.poke(NAV0);
         wsgem.setFee(0);
+        assertEq(oracle.price(), NAV0);
+    }
+
+    /// @dev Pins the read ordering. A nonzero quote is NOT taken as proof the feed is live:
+    ///      the quote's last hop (`Act.burncost`) sits behind an upgradeable proxy of its own,
+    ///      so a broken or hostile Act implementation could quote a price over a paused feed.
+    ///      The pip is the sole pause authority -- when it reads dark, a live-looking quote is
+    ///      frozen over, never followed and never anchored.
+    function test_aDivergingQuoteNeverBypassesThePauseSignal() public {
+        wsgem.setQuoteOverride(NAV0 + 0.0001e18); // a quote that no longer reads the pip
+        skip(1 days);
+
+        pip.poke(0); // the pause signal
+        assertTrue(oracle.frozen(), "a dark NAV is a pause, whatever the quote says");
+        assertEq(oracle.price(), NAV0, "the freeze holds the last report");
+        assertEq(oracle.price_w(), NAV0);
+        assertEq(oracle.cachedPrice(), NAV0, "the diverging quote must never anchor");
+
+        pip.setMode(MockPip.Mode.REVERTING); // an unreadable NAV is the same state
+        assertTrue(oracle.frozen());
         assertEq(oracle.price(), NAV0);
     }
 

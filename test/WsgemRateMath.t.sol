@@ -155,16 +155,19 @@ contract WsgemRateMathTest is Test {
         assertGt(o_.price_w(), 0);
     }
 
-    /// @dev The OTHER saturation branch. The test above overflows the multiplication; this one
-    ///      slips past it (one wei-second of rate) and overflows the addition instead: a cached
-    ///      price within `cached/WAD` of the top of uint256. Just as unreachable by the ratchet,
-    ///      just as required not to revert.
-    function test_anAdditionOverflowAlsoSaturatesRatherThanReverting() public {
+    /// @dev The storage clamp. A reading near the top of uint256 used to be the addition-overflow
+    ///      case in `_ceiling`; with `_spot` saturating every quote at uint208 -- what lets the
+    ///      anchor share one slot with its checkpoint -- that branch is unreachable (the sum tops
+    ///      out near 7e64), and what must be pinned instead is the clamp itself: an absurd
+    ///      reading saturates on the way in, wraps nothing, and the shim keeps quoting.
+    function test_anAbsurdNavIsSaturatedAtTheStorageBound() public {
         pip.poke(type(uint256).max - 1e58);
         WsgemLlamalendOracle o_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), 1);
 
+        assertEq(o_.cachedPrice(), type(uint208).max, "the anchor is clamped, not truncated");
+        assertEq(o_.spotPrice(), type(uint208).max, "the raw view is clamped the same way");
+
         skip(1);
-        assertEq(o_.priceCeiling(), type(uint256).max, "the sum must saturate, not revert");
         assertGt(o_.price(), 0);
         assertGt(o_.price_w(), 0);
     }
