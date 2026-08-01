@@ -105,8 +105,33 @@ the reported rate mildly downward — the safe direction). A faster one runs int
 so a publication observed inside it is deferred to the first `rate_w` past it, telescoped through
 any further changes in between.
 
-At the weekly cadence the floor never binds — the suite pins that a gated and an ungated
-calculator agree exactly, call for call. Its purpose is the other regime: if the feed ever moves
+The deferral is direction-blind: a downward correction republished inside the floor waits the
+same way, so the previous, higher measurement holds until the first `rate_w` past the floor. The
+floor is when recording becomes *eligible*, not when it happens — with no call, the stale reading
+persists, exactly as any unobserved publication always has here. That tail is call-driven latency
+the design already carries everywhere, and `rate_w` is permissionless, so anyone — the feed
+operator issuing the correction included — can end it the moment the floor elapses.
+Direction-blindness is deliberate, not an oversight: a floor that let falls through early could
+be packed by a down-then-up sequence into the collapsed span it exists to prevent. Only the feed
+key can publish off-cadence at all, and once the fall records, a window containing a net fall
+reads zero as ever.
+
+At the weekly cadence the floor never binds in steady operation — the suite pins that a gated and
+an ungated calculator agree exactly, call for call. The one carve-out is the deploy ramp: the
+seed checkpoint is stamped at deployment, so a publication landing within a floor of deploy is
+deferred and carries a later timestamp. Under steady observation — `rate_w` runs on every user
+operation, so daily or better on any market that is being used — the divergence that causes is
+bounded at the deferral's share of one window, surfacing once when that checkpoint becomes the
+far endpoint and healing at the next publication. If calls are sparse enough that further
+publications land before the deferred one is observed again, each unobserved publication
+telescopes into the next recorded checkpoint — the same telescoping sparse observation produces
+at any point in this design — and the transient scales with the number missed: measurability
+ramps one publication later for each, and the seed's documented early artifacts persist
+correspondingly longer. In the expected launch
+sequence either transient predates the Curve DAO vote that lifts the market's zero borrow cap;
+nothing enforces that ordering, and the bounded size is what makes it safe either way.
+
+The floor's purpose is the other regime: if the feed ever moves
 to continuous per-block accrual (a plausible future upgrade), checkpoints fall back to the floor
 and the window degrades gracefully from publication-anchored to time-anchored — a rolling
 `RATE_INTERVALS × MIN_CHECKPOINT_SPACING` (four days) of realised yield — instead of collapsing

@@ -444,6 +444,96 @@ contract WsgemRateCalculatorTest is Test {
         assertEq(t_, block.timestamp, "stamped at observation");
     }
 
+    /// @dev The floor is direction-blind: a downward correction inside it is deferred exactly
+    ///      like a rise, so the previous, higher measurement holds until the first rate_w past
+    ///      the floor. The floor is when recording becomes eligible, not when it happens -- with
+    ///      no call the stale reading persists, as any unobserved publication always has, and
+    ///      rate_w is permissionless, so anyone can end it the moment the floor elapses.
+    ///      Deliberate, not an oversight -- a floor that let falls through early could be packed
+    ///      by a down-then-up sequence into the collapsed span it exists to prevent.
+    function test_aFallInsideTheFloorIsDeferredLikeAnyOtherChange() public {
+        _runWeeks(6, 354);
+        uint256 before_ = calc.rate();
+        uint256 count_  = calc.checkpointCount();
+        assertGt(before_, 0);
+
+        // A correction lands an hour after a publication, wiping more than the window's
+        // accumulated growth.
+        skip(1 hours);
+        pip.poke((pip.price() * (10_000 - 50)) / 10_000);
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), count_, "a fall inside the floor is deferred too");
+        assertEq(calc.rate(), before_, "so the prior measurement holds while the floor runs");
+
+        // Eligibility is not recording: three quiet days past the floor, the stale rate still
+        // stands, because nothing has called to record the fall.
+        skip(3 days);
+        assertEq(calc.rate(), before_, "no call, no recording: staleness outlives the floor");
+
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), count_ + 1, "the first call past the floor records");
+        assertEq(calc.rate(), 0, "and a window containing a net fall pays no yield");
+    }
+
+    /// @dev The one place the floor binds at the weekly cadence: the deploy ramp. The seed is
+    ///      stamped at deployment, so a publication landing inside a floor of deploy is deferred
+    ///      and recorded with a later timestamp than an ungated calculator gives it. Under the
+    ///      daily observation driven here, the divergence surfaces exactly once -- when that
+    ///      checkpoint becomes the far endpoint -- is proportionally small (the deferral over
+    ///      the window, ~3.7% here), and heals the moment the endpoint advances. Sparser calls
+    ///      telescope the publications into one checkpoint instead; docs/03 covers that shape.
+    ///      In the expected launch sequence all of this predates the Curve DAO vote that lifts
+    ///      the zero borrow cap; nothing enforces that ordering, and the bounded size is what
+    ///      makes it safe either way.
+    function test_theDeployRampIsTheOnePlaceTheFloorBindsAtTheCadence() public {
+        WsgemRateCalculator open_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, 0);
+
+        // The publication cycle is mid-flight at deploy: the next one lands an hour later.
+        skip(1 hours);
+        uint256 nav_ = pip.price();
+        pip.poke(nav_ + (nav_ * 354) / 10_000 / 52);
+        calc.rate_w();
+        open_.rate_w();
+        assertEq(open_.checkpointCount(), 2, "ungated: recorded at once");
+        assertEq(calc.checkpointCount(), 1, "gated: deferred behind the floor");
+
+        // The feed holds P1's phase: every later publication lands exactly seven days after the
+        // previous one, independent of when the deferred observation records -- which is the
+        // first daily observation past the floor, a day into the first interval.
+        for (uint256 p_ = 2; p_ <= 6; ++p_) {
+            for (uint256 d_; d_ < 7; ++d_) {
+                skip(1 days);
+                calc.rate_w();
+                open_.rate_w();
+            }
+            nav_ = pip.price();
+            pip.poke(nav_ + (nav_ * 354) / 10_000 / 52);
+            calc.rate_w();
+            open_.rate_w();
+
+            if (p_ == 2) {
+                assertEq(
+                    calc.checkpointCount(),
+                    open_.checkpointCount(),
+                    "the deferred publication caught up within the first interval"
+                );
+            }
+            if (p_ < 5) {
+                // The seed, identical in both, is still the far endpoint.
+                assertEq(calc.rate(), open_.rate(), "seed-anchored windows agree exactly");
+            } else if (p_ == 5) {
+                // The deferred checkpoint is the far endpoint: same NAV, a span shorter by the
+                // deferral, a rate higher by that ratio.
+                assertGt(calc.rate(), open_.rate(), "the deferral surfaces, once");
+                assertApproxEqRel(calc.rate(), open_.rate(), 0.04e18, "and stays proportional");
+            } else {
+                assertEq(calc.rate(), open_.rate(), "one publication later it has healed");
+                assertEq(calc.measuredSpan(), open_.measuredSpan(), "spans agree again");
+            }
+        }
+    }
+
     /// @dev The other regime, and the reason the floor exists: a feed that accrues every block
     ///      (here hourly, against a one-day floor). Checkpoints fall back to the floor, the
     ///      window becomes a rolling `INTERVALS * MIN_CHECKPOINT_SPACING` of realised yield,

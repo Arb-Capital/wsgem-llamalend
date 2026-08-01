@@ -149,7 +149,9 @@ publication comfortably. Past it, the denominator grows with the wall clock and 
 decays toward zero rather than being held on evidence that has stopped arriving.
 
 `MIN_CHECKPOINT_SPACING` is insurance, not tuning: at the weekly cadence a one-day floor never
-binds (the suite pins exact agreement with an ungated calculator), and if the feed ever moves to
+binds in steady operation (the suite pins exact agreement with an ungated calculator, and pins
+the deploy ramp — a publication landing within a floor of deployment — as the one bounded,
+self-healing exception), and if the feed ever moves to
 continuous accrual it turns the window into a rolling four days of realised yield instead of
 letting it collapse to the last few observations — no redeploy, no governance action. Pick it well
 under the publication cadence and well under the grace; a day against a weekly cadence gives a 7×

@@ -278,8 +278,10 @@ contract WsgemRateCalculator is IRateCalculator {
 
         // The spacing floor. A change observed inside it is deferred, not dropped: the first
         // rate_w past the floor records it, telescoped through any further changes in between.
-        // The floor is measured in hours-to-days; validator latitude over `block.timestamp`
-        // cannot meaningfully move a boundary that coarse.
+        // Direction-blind on purpose: a fall waits like a rise, because a floor that let falls
+        // through early could be packed by a down-then-up sequence into the collapsed span it
+        // exists to prevent. The floor is measured in hours-to-days; validator latitude over
+        // `block.timestamp` cannot meaningfully move a boundary that coarse.
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp - uint256(newest_.timestamp) < MIN_CHECKPOINT_SPACING) return;
 
