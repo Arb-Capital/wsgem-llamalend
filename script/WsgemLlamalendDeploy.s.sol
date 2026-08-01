@@ -58,6 +58,11 @@ abstract contract WsgemLlamalendConfig {
     /// @notice Grace past the last publication before the reported rate starts decaying, seconds.
     function MAX_PUBLICATION_GAP() public pure virtual returns (uint256);
 
+    /// @notice Floor on the time between recorded rate checkpoints, seconds. Below the grace.
+    /// @dev The cadence bridge: inert while publications arrive slower than this, a time anchor
+    ///      for the measurement window if the feed ever accrues faster than it.
+    function MIN_CHECKPOINT_SPACING() public pure virtual returns (uint256);
+
     // --- AMM / Controller risk parameters ------------------------------------------------------
     //
     // Bounds, all enforced on-chain at creation:
@@ -221,8 +226,9 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
             ? new WsgemLlamalendOracle(IWsgem(WSGEM()), MAX_UPSIDE_SPEED())
             : WsgemLlamalendOracle(existing_);
 
-        d_.rateCalculator =
-            new WsgemRateCalculator(IWsgem(WSGEM()), RATE_INTERVALS(), MAX_PUBLICATION_GAP());
+        d_.rateCalculator = new WsgemRateCalculator(
+            IWsgem(WSGEM()), RATE_INTERVALS(), MAX_PUBLICATION_GAP(), MIN_CHECKPOINT_SPACING()
+        );
 
         // HyperbolicDynamicMP binds its Controller as an immutable, but the Controller only exists
         // once LendFactory.create runs -- and create needs the monetary policy address. The way
@@ -341,6 +347,19 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
             "controller: liquidation discount mismatch"
         );
         require(c_.configurator() == CONFIGURATOR(), "controller: configurator mismatch");
+
+        // The calculator's positional parameters, read back. Gap and spacing are both plain
+        // seconds, which is exactly the shape a silent transposition slips through -- the
+        // constructor's spacing < gap bound catches a straight swap, but not every mix-up.
+        require(d_.rateCalculator.INTERVALS() == RATE_INTERVALS(), "calc: intervals mismatch");
+        require(
+            d_.rateCalculator.MAX_PUBLICATION_GAP() == MAX_PUBLICATION_GAP(),
+            "calc: publication gap mismatch"
+        );
+        require(
+            d_.rateCalculator.MIN_CHECKPOINT_SPACING() == MIN_CHECKPOINT_SPACING(),
+            "calc: checkpoint spacing mismatch"
+        );
 
         // The monetary policy is bound to this market and nothing else.
         IHyperbolicDynamicMP mp_ = IHyperbolicDynamicMP(d_.monetaryPolicy);

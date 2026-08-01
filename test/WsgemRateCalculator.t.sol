@@ -10,6 +10,7 @@ contract WsgemRateCalculatorTest is Test {
     uint256 internal constant WAD       = 1e18;
     uint256 internal constant INTERVALS = 4;
     uint256 internal constant GAP       = 10 days;
+    uint256 internal constant SPACING   = 1 days; // the configured wstGBP checkpoint floor
     uint256 internal constant NAV0      = 1e18;
 
     /// @dev The observed cadence: ~6.8 bp per week, about 3.54% APR.
@@ -31,7 +32,7 @@ contract WsgemRateCalculatorTest is Test {
         pip   = new MockPip(NAV0);
         gem   = new MockGem(18);
         wsgem = new MockWsgem(address(gem), address(pip), 18);
-        calc  = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+        calc  = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
     }
 
     // --- Helpers -------------------------------------------------------------------------------
@@ -61,24 +62,25 @@ contract WsgemRateCalculatorTest is Test {
         assertEq(address(calc.PIP()), address(pip));
         assertEq(calc.INTERVALS(), INTERVALS);
         assertEq(calc.MAX_PUBLICATION_GAP(), GAP);
+        assertEq(calc.MIN_CHECKPOINT_SPACING(), SPACING);
         assertEq(calc.checkpointCount(), 1);
     }
 
     function test_constructorRejectsAPausedFeed() public {
         pip.poke(0);
         vm.expectRevert(WsgemRateCalculator.OraclePaused.selector);
-        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
     }
 
     function test_constructorRejectsAZeroWsgem() public {
         vm.expectRevert(WsgemRateCalculator.ZeroAddress.selector);
-        new WsgemRateCalculator(IWsgem(address(0)), INTERVALS, GAP);
+        new WsgemRateCalculator(IWsgem(address(0)), INTERVALS, GAP, SPACING);
     }
 
     function test_constructorRejectsAWsgemWithAZeroPip() public {
         MockWsgem noPip_ = new MockWsgem(address(gem), address(0), 18);
         vm.expectRevert(WsgemRateCalculator.ZeroAddress.selector);
-        new WsgemRateCalculator(IWsgem(address(noPip_)), INTERVALS, GAP);
+        new WsgemRateCalculator(IWsgem(address(noPip_)), INTERVALS, GAP, SPACING);
     }
 
     function test_constructorRejectsIntervalsOutOfRange() public {
@@ -86,18 +88,28 @@ contract WsgemRateCalculatorTest is Test {
         uint256 tooMany_ = calc.SLOTS();
 
         vm.expectRevert(WsgemRateCalculator.IntervalsOutOfRange.selector);
-        new WsgemRateCalculator(IWsgem(address(wsgem)), tooFew_, GAP);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), tooFew_, GAP, SPACING);
 
         vm.expectRevert(WsgemRateCalculator.IntervalsOutOfRange.selector);
-        new WsgemRateCalculator(IWsgem(address(wsgem)), tooMany_, GAP);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), tooMany_, GAP, SPACING);
     }
 
     function test_constructorRejectsAGapOutOfRange() public {
         vm.expectRevert(WsgemRateCalculator.PublicationGapOutOfRange.selector);
-        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, 1 days - 1);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, 1 days - 1, 0);
 
         vm.expectRevert(WsgemRateCalculator.PublicationGapOutOfRange.selector);
-        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, 90 days + 1);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, 90 days + 1, SPACING);
+    }
+
+    /// @dev A floor at or above the grace would let the rate read overdue while a genuine
+    ///      publication sat deferred behind the floor. Zero (no floor) is explicitly legal.
+    function test_constructorRejectsASpacingNotBelowTheGap() public {
+        vm.expectRevert(WsgemRateCalculator.SpacingOutOfRange.selector);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, GAP);
+
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, GAP - 1);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, 0);
     }
 
     // --- The reason this contract exists -------------------------------------------------------
@@ -210,7 +222,7 @@ contract WsgemRateCalculatorTest is Test {
 
         // Rebuild with every publication observed two days late.
         pip.poke(NAV0);
-        WsgemRateCalculator lagged_ = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+        WsgemRateCalculator lagged_ = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
         for (uint256 w_; w_ < 8; ++w_) {
             uint256 nav_ = pip.price();
             pip.poke(nav_ + (nav_ * 354) / 10_000 / 52);
@@ -315,21 +327,50 @@ contract WsgemRateCalculatorTest is Test {
     }
 
     /// @dev Only the feed key can publish this fast, so this is inside the trusted-feed model --
-    ///      but the shape is worth pinning: a collapsed span reads as an absurd per-second rate,
-    ///      and the bound on what the market actually charges is Curve's policy clamp, not this
-    ///      contract.
-    function test_rapidRepublicationCollapsesTheSpanAndSpikesToTheClamp() public {
-        _runWeeks(8, 354);
+    ///      but the shape is why `MIN_CHECKPOINT_SPACING` exists: with the floor disabled, a
+    ///      republication burst collapses the span and reads as an absurd per-second rate,
+    ///      bounded only by Curve's policy clamp. Pinned on an ungated instance; the next test
+    ///      is the production configuration absorbing the same burst.
+    function test_withoutAFloorRapidRepublicationCollapsesTheSpanAndSpikesToTheClamp() public {
+        WsgemRateCalculator open_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, 0);
+        for (uint256 w_; w_ < 4; ++w_) {
+            skip(7 days);
+            pip.poke(pip.price() + (pip.price() * 68) / 1_000_000);
+            open_.rate_w();
+        }
 
         for (uint256 i; i < 4; ++i) {
             skip(1 minutes);
             pip.poke(pip.price() + (pip.price() * 10) / 10_000); // +10 bp per minute
-            calc.rate_w();
+            open_.rate_w();
         }
 
-        uint256 r_ = calc.rate();
+        uint256 r_ = open_.rate();
         assertGt(_toApr(r_), 100e18, "a collapsed span reads as an absurd APR");
         assertGt(r_, MP_MAX_RATE, "past the base-rate clamp: the policy and Controller caps bound what is charged");
+    }
+
+    /// @dev The same burst against the production floor: nothing records inside it, the old
+    ///      window is undisturbed, and when the floor elapses the burst lands as ONE checkpoint
+    ///      whose interval is at least the floor -- so the measured rate stays inside the clamp.
+    function test_theFloorAbsorbsARepublicationBurst() public {
+        _runWeeks(8, 354);
+        uint256 before_ = calc.rate();
+        uint256 count_  = calc.checkpointCount();
+
+        for (uint256 i; i < 4; ++i) {
+            skip(1 minutes);
+            pip.poke(pip.price() + (pip.price() * 10) / 10_000);
+            calc.rate_w();
+        }
+        assertEq(calc.checkpointCount(), count_, "inside the floor nothing records");
+        assertEq(calc.rate(), before_, "and the measurement is undisturbed");
+
+        skip(SPACING);
+        calc.rate_w();
+        assertGt(calc.rate(), before_, "the burst's growth is measured once the floor elapses");
+        assertLt(calc.rate(), MP_MAX_RATE, "over at least a floor of time, so inside the clamp");
     }
 
     function test_anAlternatingFeedMeasuresItsNetWhichIsZero() public {
@@ -337,12 +378,135 @@ contract WsgemRateCalculatorTest is Test {
         uint256 nav_ = pip.price();
 
         // A period-two oscillation across an even window: the endpoints are equal, so no yield.
+        // Stepped at the spacing floor, the fastest cadence the ring will record.
         for (uint256 i; i < 6; ++i) {
-            skip(1 hours);
+            skip(SPACING);
             pip.poke(i % 2 == 0 ? nav_ + 1e15 : nav_);
             calc.rate_w();
         }
         assertEq(calc.rate(), 0, "an oscillation has no net growth across an even window");
+    }
+
+    // --- The spacing floor ---------------------------------------------------------------------
+
+    /// @dev The floor must be invisible at the publication cadence: a gated and an ungated
+    ///      calculator driven through identical weekly history must agree exactly, call for
+    ///      call. This is the property that makes the floor safe to ship against a weekly feed
+    ///      it is never expected to touch.
+    function test_theFloorIsInertAtThePublicationCadence() public {
+        WsgemRateCalculator open_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, 0);
+
+        for (uint256 w_; w_ < 8; ++w_) {
+            for (uint256 d_; d_ < 7; ++d_) {
+                skip(1 days);
+                calc.rate_w();
+                open_.rate_w();
+                assertEq(calc.rate(), open_.rate(), "the floor must not move a weekly measurement");
+            }
+            uint256 nav_ = pip.price();
+            pip.poke(nav_ + (nav_ * 354) / 10_000 / 52);
+            calc.rate_w();
+            open_.rate_w();
+        }
+
+        assertEq(calc.checkpointCount(), open_.checkpointCount());
+        assertEq(calc.rate(), open_.rate());
+        assertEq(calc.measuredSpan(), open_.measuredSpan());
+    }
+
+    /// @dev Deferred, not dropped: publications observed inside the floor telescope into the
+    ///      latest NAV, which is recorded exactly when the boundary becomes eligible.
+    function test_aDeferredPublicationIsRecordedOnceTheFloorElapses() public {
+        _runWeeks(4, 354);
+        uint256 count_ = calc.checkpointCount();
+
+        skip(1 hours);
+        uint256 first_ = pip.price() + 1e14;
+        pip.poke(first_);
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), count_, "inside the floor: deferred");
+
+        // A further publication replaces the pending value rather than creating another entry.
+        // One second below the floor is still ineligible.
+        skip(SPACING - 1 hours - 1);
+        uint256 latest_ = first_ + 2e14;
+        pip.poke(latest_);
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), count_, "one second below the floor: still deferred");
+
+        skip(1);
+        calc.rate_w();
+        assertEq(calc.checkpointCount(), count_ + 1, "at the floor: recorded");
+
+        (uint256 nav_, uint256 t_) = calc.newestCheckpoint();
+        assertEq(nav_, latest_, "deferred publications telescope into the latest NAV");
+        assertEq(t_, block.timestamp, "stamped at observation");
+    }
+
+    /// @dev The other regime, and the reason the floor exists: a feed that accrues every block
+    ///      (here hourly, against a one-day floor). Checkpoints fall back to the floor, the
+    ///      window becomes a rolling `INTERVALS * MIN_CHECKPOINT_SPACING` of realised yield,
+    ///      and the measurement stays exact -- the bridge that survives a feed upgrade with no
+    ///      redeploy and no governance action.
+    function test_continuousAccrualFallsBackToTheFloorAndMeasuresExactly() public {
+        uint256 perHour_ = uint256(0.04e18) / 365 / 24; // ~4% APR, accrued hourly
+
+        for (uint256 h_ = 1; h_ <= 9 * 24; ++h_) {
+            skip(1 hours);
+            uint256 nav_ = pip.price();
+            pip.poke(nav_ + (nav_ * perHour_) / WAD);
+            calc.rate_w();
+        }
+
+        assertEq(calc.intervalsMeasured(), INTERVALS);
+        assertEq(calc.measuredSpan(), INTERVALS * SPACING, "the window rides the floor");
+        assertApproxEqRel(_toApr(calc.rate()), 0.04e18, 0.02e18, "4% APR in, ~4% APR out");
+    }
+
+    /// @dev The real fallback will not land on neat hourly updates or exact daily observations.
+    ///      Drive continuous accrual with independently irregular update and `rate_w` timing, and
+    ///      pin both sides of the intended degradation: the window cannot collapse below the
+    ///      floor, but observation jitter does not make the measured yield drift from the feed.
+    function testFuzz_irregularContinuousAccrualAndObservationStayAccurate(uint256 seed_) public {
+        uint256 perSecond_ = uint256(0.04e18) / 365 days; // ~4% APR, accrued on every update
+        uint256 sinceCall_;
+        uint256 callAfter_ = 6 hours;
+
+        // At least ten days of history. Updates land every 2-12 hours, while observations follow
+        // an independent 3-18 hour schedule. A call can therefore fall just below the floor and
+        // defer until the next irregular call rather than checkpointing on exact daily buckets.
+        for (uint256 i_; i_ < 120; ++i_) {
+            uint256 entropy_ = uint256(keccak256(abi.encode(seed_, i_)));
+            uint256 dt_      = 2 hours + (entropy_ % 10 hours);
+
+            skip(dt_);
+            uint256 nav_ = pip.price();
+            pip.poke(nav_ + (nav_ * perSecond_ * dt_) / WAD);
+
+            sinceCall_ += dt_;
+            if (sinceCall_ >= callAfter_) {
+                calc.rate_w();
+                sinceCall_  = 0;
+                callAfter_  = 3 hours + ((entropy_ >> 128) % 15 hours);
+            }
+        }
+
+        assertEq(calc.intervalsMeasured(), INTERVALS, "irregular sampling must fill the window");
+
+        (uint256 oldNav_, uint256 oldTime_) = calc.oldestCheckpoint();
+        (uint256 newNav_, uint256 newTime_) = calc.newestCheckpoint();
+        uint256 span_ = newTime_ - oldTime_;
+
+        assertGe(span_, INTERVALS * SPACING, "the floor bounds the denominator");
+        assertLt(span_, 9 days, "observation jitter must not leave a stale window");
+        assertEq(calc.measuredSpan(), span_, "the live feed remains inside its grace");
+        assertEq(
+            calc.rate(),
+            (((newNav_ - oldNav_) * WAD) / oldNav_) / span_,
+            "irregular sampling must still measure the endpoints exactly"
+        );
+        assertApproxEqRel(_toApr(calc.rate()), 0.04e18, 0.02e18, "4% APR in, ~4% APR out");
     }
 
     /// @dev The constructor's seed checkpoint is a mid-cycle observation: its NAV belongs to the
@@ -352,10 +516,10 @@ contract WsgemRateCalculatorTest is Test {
     ///      borrow cap is zero through exactly this period -- but pinned here so it stays a
     ///      choice rather than a surprise.
     function test_theDeploySeedOverstatesEarlyAndCorrectsWhenItLeavesTheWindow() public {
-        WsgemRateCalculator fresh_ = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+        WsgemRateCalculator fresh_ = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
 
-        // The next publication lands an hour after deploy; weekly thereafter.
-        skip(1 hours);
+        // The next publication lands a day after deploy; weekly thereafter.
+        skip(1 days);
         for (uint256 i; i < 4; ++i) {
             uint256 nav_ = pip.price();
             pip.poke(nav_ + (nav_ * 354) / 10_000 / 52);
@@ -363,8 +527,8 @@ contract WsgemRateCalculatorTest is Test {
             if (i < 3) skip(7 days);
         }
 
-        // Four publications of growth measured across three weeks and an hour: ~4/3 overstated.
-        assertApproxEqRel(_toApr(fresh_.rate()), (0.0354e18 * 4) / 3, 0.05e18);
+        // Four publications of growth measured across three weeks and a day: ~28/22 overstated.
+        assertApproxEqRel(_toApr(fresh_.rate()), (uint256(0.0354e18) * 28) / 22, 0.05e18);
 
         // The fifth publication pushes the seed out of the window and the measurement corrects.
         skip(7 days);
@@ -475,7 +639,7 @@ contract WsgemRateCalculatorTest is Test {
         // spans: the per-second rate is astronomical and annualising it overflows. The view must
         // saturate -- a convenience view that can revert is a view that breaks a block explorer.
         pip.poke(1);
-        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP);
+        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP, 0);
 
         skip(1);
         pip.poke(2);
@@ -494,7 +658,7 @@ contract WsgemRateCalculatorTest is Test {
     ///      saturated NAV against a tiny old one.
     function test_anAbsurdNavDeltaReadsAsZeroRatherThanOverflowing() public {
         pip.poke(1);
-        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP);
+        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP, SPACING);
 
         skip(1 days);
         pip.poke(2);
@@ -584,8 +748,8 @@ contract WsgemRateCalculatorTest is Test {
         calc.rate_w();
 
         pip.poke(nav_);
-        skip(dt_);
-        calc.rate_w(); // records nav_ (saturated) so the measurement runs over it
+        skip(SPACING + dt_);
+        calc.rate_w(); // past the floor, so nav_ (saturated) records and the measurement runs over it
         skip(dt_);
         calc.rate();
         calc.rate_w();

@@ -56,10 +56,17 @@ contract WsgemDeployScriptTest is Test {
     function test_rateIntervalsAndGap() public view {
         assertEq(marketScript.RATE_INTERVALS(), 4);
         assertEq(marketScript.MAX_PUBLICATION_GAP(), 10 days);
+        assertEq(marketScript.MIN_CHECKPOINT_SPACING(), 1 days);
 
         // The grace must exceed the publication cadence, or an on-time feed reads as overdue and
         // the reported rate decays during normal operation.
         assertGt(marketScript.MAX_PUBLICATION_GAP(), 7 days, "grace must clear the cadence");
+
+        // The floor must sit well under the cadence, or it would defer genuine publications in
+        // normal operation instead of being the inert insurance it is meant to be.
+        assertLt(
+            marketScript.MIN_CHECKPOINT_SPACING(), 7 days, "the floor must not bind at the cadence"
+        );
     }
 
     // --- Risk parameters ----------------------------------------------------------------------------
@@ -119,6 +126,11 @@ contract WsgemDeployScriptTest is Test {
         assertLe(marketScript.RATE_INTERVALS(), 7, "SLOTS - 1");
         assertGe(marketScript.MAX_PUBLICATION_GAP(), 1 days);
         assertLe(marketScript.MAX_PUBLICATION_GAP(), 90 days);
+        assertLt(
+            marketScript.MIN_CHECKPOINT_SPACING(),
+            marketScript.MAX_PUBLICATION_GAP(),
+            "spacing below the gap"
+        );
     }
 
     // --- The two scripts must not drift apart -----------------------------------------------------------
@@ -138,6 +150,7 @@ contract WsgemDeployScriptTest is Test {
         assertEq(oracleScript.MAX_UPSIDE_SPEED(), marketScript.MAX_UPSIDE_SPEED());
         assertEq(oracleScript.RATE_INTERVALS(), marketScript.RATE_INTERVALS());
         assertEq(oracleScript.MAX_PUBLICATION_GAP(), marketScript.MAX_PUBLICATION_GAP());
+        assertEq(oracleScript.MIN_CHECKPOINT_SPACING(), marketScript.MIN_CHECKPOINT_SPACING());
         assertEq(oracleScript.A(), marketScript.A());
         assertEq(oracleScript.FEE(), marketScript.FEE());
         assertEq(oracleScript.LOAN_DISCOUNT(), marketScript.LOAN_DISCOUNT());

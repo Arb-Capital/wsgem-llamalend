@@ -31,6 +31,7 @@ Justify each against [../04-parameters.md](../04-parameters.md) rather than copy
 | `MAX_UPSIDE_SPEED` | | One publication of yield absorbed in hours; a month of allowance far below 10% |
 | `RATE_INTERVALS` | | ≥ 2. More buys jitter rejection, costs lag after a rate change |
 | `MAX_PUBLICATION_GAP` | | Comfortably above the publication cadence |
+| `MIN_CHECKPOINT_SPACING` | | Well under the cadence and the grace; the continuous-accrual window is `RATE_INTERVALS ×` this |
 | `A` | | Does the pair gap or drift? |
 | `fee` | | Within `min(1e18 * 4 / A, 1e17)` |
 | `loan_discount` | | |

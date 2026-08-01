@@ -124,7 +124,7 @@ hours, not days, while a month of allowance stays far below an order-of-magnitud
 Hard ceiling in the contract: 100% per hour (`MAX_UPSIDE_SPEED_LIMIT`). Anything looser is not a
 rate limit in any useful sense.
 
-### `RATE_INTERVALS` — 4, and `MAX_PUBLICATION_GAP` — 10 days
+### `RATE_INTERVALS` — 4, `MAX_PUBLICATION_GAP` — 10 days, `MIN_CHECKPOINT_SPACING` — 1 day
 
 The measurement is anchored on publications, not on a wall clock, so it spans a number of
 *publications* rather than a number of days. Four is about a month.
@@ -148,9 +148,17 @@ one late publication disturbs nothing. Ten days against a weekly cadence tolerat
 publication comfortably. Past it, the denominator grows with the wall clock and the reported rate
 decays toward zero rather than being held on evidence that has stopped arriving.
 
-Contract bounds: `INTERVALS` in [2, 7]; `MAX_PUBLICATION_GAP` in [1 day, 90 days]. The grace must
-exceed the publication cadence, or an on-time feed reads as overdue —
-`test_rateIntervalsAndGap` asserts that.
+`MIN_CHECKPOINT_SPACING` is insurance, not tuning: at the weekly cadence a one-day floor never
+binds (the suite pins exact agreement with an ungated calculator), and if the feed ever moves to
+continuous accrual it turns the window into a rolling four days of realised yield instead of
+letting it collapse to the last few observations — no redeploy, no governance action. Pick it well
+under the publication cadence and well under the grace; a day against a weekly cadence gives a 7×
+margin on one side and 10× on the other.
+
+Contract bounds: `INTERVALS` in [2, 7]; `MAX_PUBLICATION_GAP` in [1 day, 90 days];
+`MIN_CHECKPOINT_SPACING` below the gap, zero allowed. The grace must exceed the publication
+cadence, or an on-time feed reads as overdue, and the floor must sit well under the cadence, or it
+defers genuine publications — `test_rateIntervalsAndGap` asserts both.
 
 ## Choosing for a new wsgem
 
@@ -161,6 +169,7 @@ exceed the publication cadence, or an on-time feed reads as overdue —
 | `MAX_UPSIDE_SPEED` | One publication of yield absorbed in hours; a month of allowance far below 10%. |
 | `RATE_INTERVALS` | ≥ 2; more only buys jitter rejection, and costs lag after a rate change. |
 | `MAX_PUBLICATION_GAP` | Comfortably above the publication cadence. |
+| `MIN_CHECKPOINT_SPACING` | Well under the cadence and the grace. The window it implies under continuous accrual — `RATE_INTERVALS ×` this — should still be a measurement, not an instant. |
 | MP curve | Where the market should sit, and how hard to defend the last of the liquidity. |
 
 If a new wsgem cannot be expressed by overriding the getters in `WsgemLlamalendConfig`, that is a

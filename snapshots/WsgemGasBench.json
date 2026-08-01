@@ -1,7 +1,7 @@
 {
   "calc.rate cold": "8395",
-  "calc.rate_w checkpoint": "37348",
-  "calc.rate_w steady": "16153",
+  "calc.rate_w checkpoint": "37579",
+  "calc.rate_w steady": "16266",
   "oracle.price cold": "17006",
   "oracle.price frozen": "5558",
   "oracle.price warm": "4006",

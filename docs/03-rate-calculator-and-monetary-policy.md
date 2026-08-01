@@ -96,6 +96,25 @@ wall clock and the reported rate decays toward zero.
 Inside the grace period the rate does not move at all, so a single late publication is absorbed
 without disturbing borrowers. `overdue()` reports which side of it the feed is on.
 
+### If the cadence changes
+
+Nothing above assumes the weekly cadence survives, and the calculator is built to outlive it
+without redeployment. A slower feed simply spans wider intervals (with the grace period biasing
+the reported rate mildly downward — the safe direction). A faster one runs into
+`MIN_CHECKPOINT_SPACING` (1 day): checkpoints are never recorded closer together than the floor,
+so a publication observed inside it is deferred to the first `rate_w` past it, telescoped through
+any further changes in between.
+
+At the weekly cadence the floor never binds — the suite pins that a gated and an ungated
+calculator agree exactly, call for call. Its purpose is the other regime: if the feed ever moves
+to continuous per-block accrual (a plausible future upgrade), checkpoints fall back to the floor
+and the window degrades gracefully from publication-anchored to time-anchored — a rolling
+`RATE_INTERVALS × MIN_CHECKPOINT_SPACING` (four days) of realised yield — instead of collapsing
+to the last few observations. The floor also bounds the measurement denominator from below, which
+is what keeps a republication burst, or a burst of observations lagging one, from reading as an
+absurd instantaneous rate. One deployment serves both regimes; the transition needs no action
+from anyone.
+
 ## Every failure resolves to zero
 
 Too few publications, a NAV that has not risen, a NAV that has fallen, a zero denominator, an
@@ -123,9 +142,11 @@ borrow rate the instant a publication is late would be its own kind of wrong.
 Curve's note on `Controller._save_rate` says a stateful monetary policy must permission
 `rate_write`. That applies to the policy, and Curve's policy does permission it. This calculator
 sits one layer further out and is deliberately open, because there is nothing to gain by calling
-it: a checkpoint is appended *only* when the NAV differs from the newest stored one, so no caller
-can add a spurious entry or pack the ring to collapse the window. All a caller can influence is how
-promptly a genuine publication is observed — and a systematic lag cancels between the endpoints.
+it: a checkpoint is appended *only* when the NAV differs from the newest stored one and the
+spacing floor has elapsed, so no caller can add a spurious entry or pack the ring to collapse the
+window — the floor makes the second half of that claim hold even against a feed that changes
+every block. All a caller can influence is how promptly a genuine publication is observed — and a
+systematic lag cancels between the endpoints.
 
 ## The monetary policy: `HyperbolicDynamicMP`
 

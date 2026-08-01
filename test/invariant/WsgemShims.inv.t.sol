@@ -18,6 +18,7 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
     uint256 internal constant SPEED     = uint256(0.0025e18) / 1 days;
     uint256 internal constant INTERVALS = 4;
     uint256 internal constant GAP       = 10 days;
+    uint256 internal constant SPACING   = 1 days;
     uint256 internal constant NAV0      = 1e18;
 
     MockPip              internal pip;
@@ -33,7 +34,7 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
         gem     = new MockGem(18);
         wsgem   = new MockWsgem(address(gem), address(pip), 18);
         oracle  = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
-        calc    = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+        calc    = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
         handler = new WsgemShimHandler(oracle, calc, pip, wsgem);
 
         targetContract(address(handler));
@@ -144,5 +145,18 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
     function invariant_theRingNeverOverfills() public view {
         assertLe(calc.checkpointCount(), calc.SLOTS());
         assertGt(calc.checkpointCount(), 0);
+    }
+
+    /// @notice Consecutive checkpoints are never closer than the spacing floor, so the
+    ///         measurement denominator is bounded below by `intervals * floor` -- the property
+    ///         that keeps any burst of republications or observations from collapsing the span
+    ///         into a rate spike.
+    function invariant_theSpacingFloorHoldsBetweenCheckpoints() public view {
+        uint256 n_ = calc.intervalsMeasured();
+        if (n_ < calc.MIN_INTERVALS()) return;
+
+        (, uint256 oldTime_) = calc.oldestCheckpoint();
+        (, uint256 newTime_) = calc.newestCheckpoint();
+        assertGe(newTime_ - oldTime_, n_ * SPACING, "a recorded gap undercut the floor");
     }
 }

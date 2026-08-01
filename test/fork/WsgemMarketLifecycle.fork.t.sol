@@ -87,7 +87,9 @@ contract WsgemMarketLifecycleForkTest is Test {
         CONFIGURATOR = cfg.CONFIGURATOR();
 
         oracle = new WsgemLlamalendOracle(IWsgem(WSGEM), cfg.MAX_UPSIDE_SPEED());
-        calc   = new WsgemRateCalculator(IWsgem(WSGEM), cfg.RATE_INTERVALS(), cfg.MAX_PUBLICATION_GAP());
+        calc = new WsgemRateCalculator(
+            IWsgem(WSGEM), cfg.RATE_INTERVALS(), cfg.MAX_PUBLICATION_GAP(), cfg.MIN_CHECKPOINT_SPACING()
+        );
 
         address predicted_ = vm.computeCreateAddress(FACTORY, vm.getNonce(FACTORY) + 2);
         mp = _deployPolicy(predicted_);

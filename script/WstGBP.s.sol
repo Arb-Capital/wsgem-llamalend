@@ -63,6 +63,16 @@ abstract contract WstGBPConstants {
     ///      clock, so an abandoned feed decays toward zero rather than holding its last reading.
     uint256 internal constant MAX_PUBLICATION_GAP_WSTGBP = 10 days;
 
+    /// @dev One day against a weekly cadence: seven times slower than the publication interval,
+    ///      so it never binds today -- checkpoints stay publication-anchored, and the test suite
+    ///      pins that a gated and an ungated calculator agree exactly at this cadence. It is
+    ///      insurance for a feed regime change: if wstGBP's NAV ever accrues continuously (a
+    ///      discussed upgrade), checkpoints fall back to daily and the measurement becomes a
+    ///      rolling four days of realised yield, with no redeploy and no governance action. It
+    ///      also floors the measurement denominator at four days, bounding what any
+    ///      republication burst can read as.
+    uint256 internal constant MIN_CHECKPOINT_SPACING_WSTGBP = 1 days;
+
     // --- Risk parameters -----------------------------------------------------------------------
     //
     // Starting point taken from Curve's own stable/stable reference market (sDOLA/crvUSD, market 0
@@ -115,6 +125,10 @@ contract WstGBPOracleScript is WsgemOracleScript, WstGBPConstants {
 
     function MAX_PUBLICATION_GAP() public pure override returns (uint256) {
         return MAX_PUBLICATION_GAP_WSTGBP;
+    }
+
+    function MIN_CHECKPOINT_SPACING() public pure override returns (uint256) {
+        return MIN_CHECKPOINT_SPACING_WSTGBP;
     }
 
     function A() public pure override returns (uint256) {
@@ -182,6 +196,10 @@ contract WstGBPMarketScript is WsgemMarketScript, WstGBPConstants {
 
     function MAX_PUBLICATION_GAP() public pure override returns (uint256) {
         return MAX_PUBLICATION_GAP_WSTGBP;
+    }
+
+    function MIN_CHECKPOINT_SPACING() public pure override returns (uint256) {
+        return MIN_CHECKPOINT_SPACING_WSTGBP;
     }
 
     function A() public pure override returns (uint256) {

@@ -333,7 +333,7 @@ contract WsgemRateMathTest is Test {
         for (uint256 intervals_ = 2; intervals_ <= 7; ++intervals_) {
             pip.poke(NAV0);
             WsgemRateCalculator c_ =
-                new WsgemRateCalculator(IWsgem(address(wsgem)), intervals_, 10 days);
+                new WsgemRateCalculator(IWsgem(address(wsgem)), intervals_, 10 days, 1 days);
 
             uint256 nav_ = NAV0;
             for (uint256 i; i < 30; ++i) {
@@ -356,7 +356,8 @@ contract WsgemRateMathTest is Test {
 
     /// @notice The measured rate is exactly what the endpoints imply, at every wrap position.
     function test_theMeasuredRateMatchesTheReferenceThroughTheRing() public {
-        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 4, 10 days);
+        WsgemRateCalculator c_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), 4, 10 days, 1 days);
 
         uint256 nav_ = NAV0;
         for (uint256 i; i < 30; ++i) {
@@ -379,7 +380,7 @@ contract WsgemRateMathTest is Test {
     ///         excess beyond it.
     function testFuzz_theOverdueExtensionIsExact(uint32 overdueBy_) public {
         uint256 gap_ = 10 days;
-        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, gap_);
+        WsgemRateCalculator c_ = new WsgemRateCalculator(IWsgem(address(wsgem)), 2, gap_, 1 days);
 
         uint256 nav_ = NAV0;
         for (uint256 i; i < 2; ++i) {

@@ -55,6 +55,7 @@ generic docs discuss the two capabilities separately.
 | `MAX_UPSIDE_SPEED` | 0.25% / day | The observed 6.8 bp step clears in ~6.5h at a measured cost of ~0.11 bp; a mistaken 10× takes ~2.5 years |
 | `RATE_INTERVALS` | 4 | ~1 month. A policy-rate cut is tracked within four publications rather than averaged against eight |
 | `MAX_PUBLICATION_GAP` | 10 days | Grace: one late publication moves the reported rate not at all |
+| `MIN_CHECKPOINT_SPACING` | 1 day | Inert at the weekly cadence (7× margin). If the feed ever accrues continuously, the window becomes a rolling 4 days of realised yield — no redeploy |
 | `A` | 285 | ~35 bp bands. The ratio drifts, it does not gap |
 | `fee` | 0.2% | Ceiling at A=285 is ~1.40% |
 | `loan_discount` | 1.3% | |

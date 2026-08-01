@@ -25,6 +25,7 @@ contract WsgemGasBench is Test {
     uint256 internal constant SPEED     = uint256(0.0025e18) / 1 days;
     uint256 internal constant INTERVALS = 4;
     uint256 internal constant GAP       = 10 days;
+    uint256 internal constant SPACING   = 1 days;
 
     /// @dev The observed cadence, ~6.8 bp per week: 354 bp annualised over 52 weekly steps.
     uint256 internal constant APR_BPS = 354;
@@ -41,7 +42,7 @@ contract WsgemGasBench is Test {
         gem    = new MockGem(18);
         wsgem  = new MockWsgem(address(gem), address(pip), 18);
         oracle = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
-        calc   = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP);
+        calc   = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
 
         // A month of live operation: weekly publications, the market touching both write
         // paths daily as the Controller and AMM would. Leaves the calculator with a full

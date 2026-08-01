@@ -33,6 +33,16 @@ import {IRateCalculator} from "./interfaces/IRateCalculator.sol";
 ///      endpoint timing jitter by four. Systematic observation lag cancels entirely, since it
 ///      shifts both endpoints equally.
 ///
+///      IF THE CADENCE CHANGES. Nothing here assumes the publication cadence survives. A slower
+///      feed simply spans wider intervals. A faster one -- up to continuous per-block accrual, a
+///      plausible future for this feed -- runs into `MIN_CHECKPOINT_SPACING`: checkpoints are
+///      never recorded closer together than the floor, so the window degrades gracefully from
+///      publication-anchored to time-anchored (a rolling `INTERVALS * MIN_CHECKPOINT_SPACING` of
+///      realised yield) instead of collapsing to the last few observations. The floor also puts
+///      a hard lower bound on the measurement denominator, which is what keeps a republication
+///      burst -- or a burst of observations lagging one -- from reading as an absurd
+///      instantaneous rate. One deployment serves both regimes; the transition needs no action.
+///
 ///      IF PUBLICATIONS STOP. Between publications the reported rate is deliberately flat. Once
 ///      the feed is overdue by more than `MAX_PUBLICATION_GAP`, the denominator starts growing
 ///      with the wall clock, so the reported rate decays toward zero rather than being held
@@ -90,6 +100,13 @@ contract WsgemRateCalculator is IRateCalculator {
     ///      with room for a late one.
     uint256 public immutable MAX_PUBLICATION_GAP;
 
+    /// @notice Minimum time between recorded checkpoints. Zero disables the floor.
+    /// @dev The cadence bridge -- see the contract note. Inert at any publication cadence slower
+    ///      than the floor; a time anchor if the feed ever accrues faster than it. Bounded below
+    ///      the grace period, because a floor at or above the grace would let the rate read
+    ///      overdue while a genuine publication sat deferred behind the floor.
+    uint256 public immutable MIN_CHECKPOINT_SPACING;
+
     // --- Types -------------------------------------------------------------------------------
 
     /// @dev One storage slot. `uint208` holds any NAV that is not already nonsense (2.6e62 in WAD);
@@ -114,6 +131,7 @@ contract WsgemRateCalculator is IRateCalculator {
     error ZeroAddress();
     error IntervalsOutOfRange();
     error PublicationGapOutOfRange();
+    error SpacingOutOfRange();
     error OraclePaused();
 
     // --- Events ------------------------------------------------------------------------------
@@ -123,23 +141,32 @@ contract WsgemRateCalculator is IRateCalculator {
 
     // --- Construction ------------------------------------------------------------------------
 
-    /// @param wsgem_             The wsgem whose yield is measured.
-    /// @param intervals_         Publication intervals to measure across. In [2, SLOTS - 1].
-    /// @param maxPublicationGap_ Grace period past the last publication before the rate decays.
-    constructor(IWsgem wsgem_, uint256 intervals_, uint256 maxPublicationGap_) {
+    /// @param wsgem_                The wsgem whose yield is measured.
+    /// @param intervals_            Publication intervals to measure across. In [2, SLOTS - 1].
+    /// @param maxPublicationGap_    Grace period past the last publication before the rate decays.
+    /// @param minCheckpointSpacing_ Floor on the time between recorded checkpoints. Below the
+    ///                              grace; zero disables it.
+    constructor(
+        IWsgem wsgem_,
+        uint256 intervals_,
+        uint256 maxPublicationGap_,
+        uint256 minCheckpointSpacing_
+    ) {
         if (address(wsgem_) == address(0)) revert ZeroAddress();
         if (intervals_ < MIN_INTERVALS || intervals_ > SLOTS - 1) revert IntervalsOutOfRange();
         if (maxPublicationGap_ < 1 days || maxPublicationGap_ > 90 days) {
             revert PublicationGapOutOfRange();
         }
+        if (minCheckpointSpacing_ >= maxPublicationGap_) revert SpacingOutOfRange();
 
         address pip_ = wsgem_.pip();
         if (pip_ == address(0)) revert ZeroAddress();
 
-        WSGEM               = wsgem_;
-        PIP                 = IPip(pip_);
-        INTERVALS           = intervals_;
-        MAX_PUBLICATION_GAP = maxPublicationGap_;
+        WSGEM                  = wsgem_;
+        PIP                    = IPip(pip_);
+        INTERVALS              = intervals_;
+        MAX_PUBLICATION_GAP    = maxPublicationGap_;
+        MIN_CHECKPOINT_SPACING = minCheckpointSpacing_;
 
         // Refuse to deploy against a paused feed: the first checkpoint would be a zero NAV, which
         // is not a measurement of anything and would sit in the ring as a zero denominator.
@@ -246,7 +273,15 @@ contract WsgemRateCalculator is IRateCalculator {
         if (spot_ == 0) return;
 
         uint256 head_ = _head;
-        if (_ring[head_].nav == _toUint208(spot_)) return; // no publication since the last one
+        Checkpoint memory newest_ = _ring[head_];
+        if (newest_.nav == _toUint208(spot_)) return; // no publication since the last one
+
+        // The spacing floor. A change observed inside it is deferred, not dropped: the first
+        // rate_w past the floor records it, telescoped through any further changes in between.
+        // The floor is measured in hours-to-days; validator latitude over `block.timestamp`
+        // cannot meaningfully move a boundary that coarse.
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp - uint256(newest_.timestamp) < MIN_CHECKPOINT_SPACING) return;
 
         uint256 next_ = (head_ + 1) % SLOTS;
         _ring[next_]  = Checkpoint({nav: _toUint208(spot_), timestamp: uint48(block.timestamp)});
