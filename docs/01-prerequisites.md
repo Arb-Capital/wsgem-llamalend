@@ -9,6 +9,7 @@ Everything that has to be in place before [05-deploy-mainnet.md](05-deploy-mainn
 | `forge` / `cast` | 1.7.1 | `forge --version` | Everything. Pinned in CI. |
 | `git` | any | `git --version` | Submodules. |
 | `make` | any | `make --version` | Every target in this repo. |
+| `genhtml` (lcov) | any | `genhtml --version` | `make gen-report` only. `make coverage` needs just forge. |
 
 `vyper` is **not** required. Curve's monetary policy ships as vendored bytecode — see
 [`script/bytecode/PROVENANCE.md`](../script/bytecode/PROVENANCE.md). You only need a Vyper
@@ -91,8 +92,9 @@ Full address list in [reference/addresses.md](reference/addresses.md).
 ## 6. Run the suites
 
 ```bash
-make test        # 134 unit + invariant tests, no RPC
+make test        # 210 unit + invariant tests, no RPC
 make test-fork   # 31 fork tests against live mainnet state
+make coverage    # first-party src coverage (excludes fork tests and the gas bench)
 ```
 
 `make test-fork` hard-fails without a mainnet RPC rather than skipping. That is deliberate: a

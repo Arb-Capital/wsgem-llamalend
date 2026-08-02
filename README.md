@@ -47,8 +47,11 @@ constants, done.
 
 ```bash
 make deps && make build
-make test          # 153 unit + invariant tests, no RPC
+make test          # 210 unit + invariant tests, no RPC
 make test-fork     # 31 tests against live mainnet state (needs ETH_RPC_URL)
+
+make coverage      # first-party src coverage summary to the terminal
+make gen-report    # + HTML report into docs/coverage-report/ (gitignored; needs lcov)
 
 make oracle-dry    # simulate the oracle deploy against live state
 make market-dry    # simulate the whole market deploy, every assert running

@@ -16,6 +16,7 @@ docs/book/
 
 # Coverage
 lcov.info
+docs/coverage-report/
 
 # Dotenv file
 .env

@@ -401,4 +401,61 @@ contract WsgemRateMathTest is Test {
         if (block.timestamp > newTime_ + gap_) expected_ += block.timestamp - (newTime_ + gap_);
         assertEq(c_.measuredSpan(), expected_);
     }
+
+    // --- Timestamp horizons -----------------------------------------------------------------------
+
+    /// @notice The calculator's uint48 checkpoint clock measures exactly right up to its horizon
+    ///         (the year 8,921,556).
+    /// @dev Every other test warps from 1.8e9; this pins that nothing in the ring arithmetic
+    ///      quietly depends on small timestamps.
+    function test_theCalculatorSurvivesTimestampsNearTheUint48Bound() public {
+        vm.warp(uint256(type(uint48).max) - 30 days);
+        pip.poke(NAV0);
+        WsgemRateCalculator c_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), 4, 10 days, 1 days);
+
+        uint256 nav_ = NAV0;
+        for (uint256 i; i < 4; ++i) {
+            skip(7 days);
+            nav_ += 1e14;
+            pip.poke(nav_);
+            c_.rate_w();
+        }
+
+        assertEq(c_.intervalsMeasured(), 4, "the window fills below the horizon");
+        assertEq(c_.measuredSpan(), 4 * 7 days);
+        (uint256 oldNav_, uint256 oldTime_) = c_.oldestCheckpoint();
+        (uint256 newNav_, uint256 newTime_) = c_.newestCheckpoint();
+        assertEq(newTime_ - oldTime_, 4 * 7 days, "the stored clocks are exact, not truncated");
+        assertEq(c_.rate(), RateMathReference.rate(oldNav_, newNav_, c_.measuredSpan()));
+    }
+
+    /// @notice Past the oracle's uint40 horizon (the year 36,812) the stored clock wraps small,
+    ///         every elapsed reads huge, and the elapsed cap turns that into a bounded, safe
+    ///         degradation: at most `MAX_ELAPSED` of allowance per write, never a revert, never
+    ///         a report above spot.
+    /// @dev Documented degradation, not a wrap hazard -- pinned so it stays that way.
+    function test_theOracleDegradesToTheElapsedCapBeyondTheUint40Horizon() public {
+        vm.warp(uint256(type(uint40).max) - 1 days);
+        pip.poke(NAV0);
+        WsgemLlamalendOracle o_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
+
+        // The first write past the horizon stores a truncated clock.
+        skip(2 days);
+        o_.price_w();
+        assertLt(uint256(o_.cachedTimestamp()), 2 days, "the stored clock has wrapped");
+
+        // From here `block.timestamp - cachedTimestamp` is astronomically large, and the cap is
+        // the whole defence: allowance tops out at seven days' worth however wrong the clock is.
+        pip.poke(NAV0 * 2);
+        skip(1 hours);
+        uint256 cappedCeiling_ = NAV0 + (NAV0 * (SPEED * o_.MAX_ELAPSED())) / WAD;
+        assertEq(o_.priceCeiling(), cappedCeiling_, "the wrapped elapsed clamps at MAX_ELAPSED");
+
+        uint256 p_ = o_.price();
+        assertGt(p_, 0, "never zero");
+        assertLe(p_, NAV0 * 2, "never above spot");
+        assertEq(p_, cappedCeiling_, "the capped ceiling binds against the doubled feed");
+        assertEq(o_.price_w(), p_, "and the pair still agree");
+    }
 }

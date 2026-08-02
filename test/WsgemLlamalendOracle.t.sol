@@ -85,6 +85,21 @@ contract WsgemLlamalendOracleTest is Test {
         new WsgemLlamalendOracle(IWsgem(address(wsgem)), 0);
     }
 
+    function test_constructorAcceptsTheSpeedBoundaries() public {
+        WsgemLlamalendOracle slowest_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), 1);
+        assertEq(slowest_.MAX_UPSIDE_SPEED(), 1);
+
+        uint256 limit_ = oracle.MAX_UPSIDE_SPEED_LIMIT();
+        WsgemLlamalendOracle fastest_ = new WsgemLlamalendOracle(IWsgem(address(wsgem)), limit_);
+        assertEq(fastest_.MAX_UPSIDE_SPEED(), limit_);
+    }
+
+    function test_constructorEmitsTheInitialPrice() public {
+        vm.expectEmit(true, true, false, true);
+        emit PriceUpdated(NAV0, NAV0);
+        new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
+    }
+
     // --- The factory's own check ---------------------------------------------------------------
 
     /// @dev `LendFactory.create` reads `price()` into a local and asserts `price_w()` equals it.
@@ -439,6 +454,27 @@ contract WsgemLlamalendOracleTest is Test {
         assertEq(oracle.price(), NAV0);
     }
 
+    /// @dev The other side of the same hazard: the quote's last hop breaks while the pip stays
+    ///      live. An unreadable quote is a pause with a different shape -- the price freezes at
+    ///      the last report rather than following a feed that can no longer be valued. Needs its
+    ///      own harness: MockWsgem's `burncost` only fails when the pip itself does, so this
+    ///      branch is unreachable through it.
+    function test_aBrokenQuoteHopOverALiveNavFreezes() public {
+        QuoteBreakingWsgem broken_ = new QuoteBreakingWsgem(address(gem), address(pip));
+        WsgemLlamalendOracle o_ = new WsgemLlamalendOracle(IWsgem(address(broken_)), SPEED);
+        assertEq(o_.price(), NAV0);
+
+        broken_.setBroken(true);
+        assertTrue(o_.frozen(), "an unreadable quote over a live NAV is a pause");
+        assertFalse(o_.quoteIsZero(), "and not the zero-quote state");
+        assertEq(o_.price(), NAV0, "frozen at the last report");
+        assertEq(o_.price_w(), NAV0);
+
+        broken_.setBroken(false);
+        assertFalse(o_.frozen());
+        assertEq(o_.price(), NAV0);
+    }
+
     // --- Events ----------------------------------------------------------------------------------
 
     event PriceUpdated(uint256 indexed price, uint256 indexed spot);
@@ -454,6 +490,17 @@ contract WsgemLlamalendOracleTest is Test {
 
         vm.expectEmit(true, true, false, true, address(oracle));
         emit PriceUpdated(expected_, NAV0 * 10);
+        oracle.price_w();
+    }
+
+    /// @dev A fall passes through undamped, and it is evented like any other move -- the
+    ///      downward emit path, which no other test pins.
+    function test_priceWEmitsOnADownwardMove() public {
+        uint256 lower_ = NAV0 / 2;
+        pip.poke(lower_);
+
+        vm.expectEmit(true, true, false, true, address(oracle));
+        emit PriceUpdated(lower_, lower_);
         oracle.price_w();
     }
 
@@ -542,5 +589,31 @@ contract WsgemLlamalendOracleTest is Test {
         skip(dt2_);
         assertLe(oracle.price(), nav2_, "no checkpoint history may push the report past spot");
         assertEq(oracle.price_w(), oracle.price());
+    }
+}
+
+/// @notice A wrapper whose quote hop can be broken independently of the pip -- the shape of an
+///         Act proxy upgrade that reverts while the NAV stays live.
+/// @dev MockWsgem cannot reach this state: its `burncost` only fails when the pip itself does,
+///      and the pip read short-circuits `_spot` first.
+contract QuoteBreakingWsgem {
+    address public immutable gem;
+    address public immutable pip;
+    uint8 public constant decimals = 18;
+
+    bool public broken;
+
+    constructor(address gem_, address pip_) {
+        gem = gem_;
+        pip = pip_;
+    }
+
+    function setBroken(bool broken_) external {
+        broken = broken_;
+    }
+
+    function burncost() external view returns (uint256) {
+        require(!broken, "act: unreadable");
+        return MockPip(pip).read();
     }
 }

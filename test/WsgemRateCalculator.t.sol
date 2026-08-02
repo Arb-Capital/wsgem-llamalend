@@ -112,6 +112,32 @@ contract WsgemRateCalculatorTest is Test {
         new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, 0);
     }
 
+    function test_constructorAcceptsTheGapBoundaries() public {
+        WsgemRateCalculator shortest_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, 1 days, 0);
+        assertEq(shortest_.MAX_PUBLICATION_GAP(), 1 days);
+
+        WsgemRateCalculator longest_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, 90 days, SPACING);
+        assertEq(longest_.MAX_PUBLICATION_GAP(), 90 days);
+    }
+
+    function test_constructorAcceptsTheIntervalBoundaries() public {
+        WsgemRateCalculator narrow_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), calc.MIN_INTERVALS(), GAP, SPACING);
+        assertEq(narrow_.INTERVALS(), calc.MIN_INTERVALS());
+
+        WsgemRateCalculator wide_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), calc.SLOTS() - 1, GAP, SPACING);
+        assertEq(wide_.INTERVALS(), calc.SLOTS() - 1);
+    }
+
+    function test_constructorEmitsTheSeedCheckpoint() public {
+        vm.expectEmit(true, true, false, true);
+        emit Checkpointed(NAV0, 0);
+        new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
+    }
+
     // --- The reason this contract exists -------------------------------------------------------
 
     /// @dev The failure mode a wall-clock window has: the denominator grows between publications
@@ -266,6 +292,45 @@ contract WsgemRateCalculatorTest is Test {
         assertLt(_toApr(calc.rate()), 0.001e18, "ten years of silence must decay to nothing");
     }
 
+    /// @dev Both the overdue flag and the span extension use the same strict `>` boundary: at
+    ///      exactly `newest + GAP` the feed is still in grace and the measurement untouched;
+    ///      one second later it is overdue and the denominator has grown by exactly that second.
+    function test_overdueFlipsExactlyOneSecondPastTheGap() public {
+        _runWeeks(8, 354);
+        (uint256 oldNav_, uint256 oldTime_) = calc.oldestCheckpoint();
+        (uint256 newNav_, uint256 newTime_) = calc.newestCheckpoint();
+        uint256 endpointSpan_  = newTime_ - oldTime_;
+        uint256 atPublication_ = calc.rate();
+
+        vm.warp(newTime_ + GAP);
+        assertFalse(calc.overdue(), "at the boundary the feed is still in grace");
+        assertEq(calc.measuredSpan(), endpointSpan_, "and the span is the endpoints' alone");
+        assertEq(calc.rate(), atPublication_);
+
+        skip(1);
+        assertTrue(calc.overdue(), "one second past the gap the feed is overdue");
+        assertEq(calc.measuredSpan(), endpointSpan_ + 1, "the span extends by exactly the excess");
+        assertEq(
+            calc.rate(),
+            (((newNav_ - oldNav_) * WAD) / oldNav_) / (endpointSpan_ + 1),
+            "the rate uses the extended denominator from the first overdue second"
+        );
+    }
+
+    /// @dev `apr()` is the exact saturating annualisation of `rate()` in every regime, the
+    ///      overdue decay included -- it must shrink with the growing denominator, not hold the
+    ///      at-publication figure.
+    function test_aprDecaysExactlyWithTheOverdueSpan() public {
+        _runWeeks(8, 354);
+        uint256 aprAtPublication_ = calc.apr();
+
+        skip(GAP + 14 days);
+        assertTrue(calc.overdue());
+        assertEq(calc.apr(), calc.rate() * 365 days, "apr is the exact annualisation while decaying");
+        assertLt(calc.apr(), aprAtPublication_, "and it decays with the span");
+        assertGt(calc.apr(), 0);
+    }
+
     // --- Failure modes -------------------------------------------------------------------------
 
     function test_aFlatNavPaysNothing() public {
@@ -413,6 +478,57 @@ contract WsgemRateCalculatorTest is Test {
         assertEq(calc.checkpointCount(), open_.checkpointCount());
         assertEq(calc.rate(), open_.rate());
         assertEq(calc.measuredSpan(), open_.measuredSpan());
+    }
+
+    /// @dev With the floor disabled every distinct reading is a publication, same-block ones
+    ///      included -- the `0 < 0` comparison in the spacing gate is trivially false, which is
+    ///      what "zero disables the floor" means. The views must stay total over whatever span
+    ///      shape that produces, a fully same-block window included.
+    function testFuzz_withTheFloorDisabledEveryDistinctPublicationRecords(uint256 seed_) public {
+        WsgemRateCalculator open_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, 0);
+
+        uint256 expected_ = 1; // the seed
+        for (uint256 i_; i_ < 12; ++i_) {
+            uint256 entropy_ = uint256(keccak256(abi.encode(seed_, i_)));
+            skip(entropy_ % 3 days); // zero included: a same-block distinct NAV must record
+            pip.poke(NAV0 + (i_ + 1) * 1e14);
+            open_.rate_w();
+
+            expected_ = expected_ < open_.SLOTS() ? expected_ + 1 : expected_;
+            assertEq(open_.checkpointCount(), expected_, "every distinct NAV records at once");
+
+            // Steps stay under 3 days against a 10-day grace, so the feed is never overdue and
+            // the span, when measurable, is exactly the endpoints' difference -- zero included.
+            open_.rate();
+            open_.apr();
+            if (open_.measurable()) {
+                (, uint256 oldTime_) = open_.oldestCheckpoint();
+                (, uint256 newTime_) = open_.newestCheckpoint();
+                assertEq(open_.measuredSpan(), newTime_ - oldTime_);
+            } else {
+                assertEq(open_.measuredSpan(), 0);
+            }
+        }
+    }
+
+    /// @dev The furthest the last test's collapse can go: with the floor disabled a window can
+    ///      fall entirely into one block, both endpoints sharing a timestamp. A zero denominator
+    ///      must read as no yield, never as a division error inside a market operation.
+    function test_aFullySameBlockWindowReadsZeroRateNotDivisionByZero() public {
+        WsgemRateCalculator open_ =
+            new WsgemRateCalculator(IWsgem(address(wsgem)), 2, GAP, 0);
+
+        skip(1 days);
+        for (uint256 i = 1; i <= 3; ++i) {
+            pip.poke(NAV0 + i * 1e14);
+            open_.rate_w();
+        }
+
+        assertTrue(open_.measurable(), "three same-block publications fill a two-interval window");
+        assertEq(open_.measuredSpan(), 0, "both endpoints share a block");
+        assertEq(open_.rate(), 0, "a zero denominator is no yield, not a division error");
+        assertEq(open_.apr(), 0);
     }
 
     /// @dev Deferred, not dropped: publications observed inside the floor telescope into the
@@ -636,7 +752,7 @@ contract WsgemRateCalculatorTest is Test {
         pip.setMode(MockPip.Mode.GAS_BOMB);
         uint256 g0_ = gasleft();
         calc.rate_w();
-        assertLt(g0_ - gasleft(), 300_000, "the read must never forward more than PIP_READ_GAS");
+        assertLt(g0_ - gasleft(), calc.PIP_READ_GAS() + 50_000, "the read must never forward more than PIP_READ_GAS");
         assertEq(calc.rate(), rate_, "a burning feed holds the measurement, like a pause");
         assertEq(calc.checkpointCount(), count_);
     }
@@ -764,6 +880,58 @@ contract WsgemRateCalculatorTest is Test {
         assertEq(c_.apr(), 0);
     }
 
+    /// @dev Once the stored NAV is saturated, every further reading at or above the clamp
+    ///      compares equal to it and is silently not a publication: the plateau is one
+    ///      checkpoint, not many. A fall below the clamp ends it. The saturation happens at the
+    ///      read, so the event and the ring agree -- both carry the clamp, never the raw reading.
+    function test_aSaturatedNavDefersFurtherSaturatedReadingsUntilTheFeedFalls() public {
+        _runWeeks(8, 354); // eight publications walk the head back to slot 0
+
+        skip(7 days);
+        pip.poke(type(uint256).max);
+        vm.expectEmit(true, true, false, true, address(calc));
+        emit Checkpointed(uint256(type(uint208).max), 1);
+        calc.rate_w();
+        (uint256 nav_, uint256 t_) = calc.newestCheckpoint();
+        assertEq(nav_, uint256(type(uint208).max), "the ring stores the clamp, not the reading");
+
+        skip(SPACING);
+        pip.poke(type(uint256).max - 1);
+        calc.rate_w();
+        (, uint256 tAfter_) = calc.newestCheckpoint();
+        assertEq(tAfter_, t_, "a saturated plateau records nothing further");
+
+        skip(SPACING);
+        pip.poke(NAV0);
+        calc.rate_w();
+        (uint256 navAfter_,) = calc.newestCheckpoint();
+        assertEq(navAfter_, NAV0, "a fall below the clamp is a publication again");
+    }
+
+    /// @dev Unreachable by construction -- the constructor refuses a zero seed and `_checkpoint`
+    ///      never records a zero -- so the `old_.nav == 0` guard in `_rate` is defence in depth.
+    ///      Corrupt the ring directly to pin what it defends: a zero denominator waiting in the
+    ///      window reads as no yield, never as a revert propagated into every market operation.
+    function test_aZeroNavInTheRingWouldReadAsZeroRateNotRevert() public {
+        skip(7 days);
+        pip.poke(NAV0 + 1e14);
+        calc.rate_w();
+        skip(7 days);
+        pip.poke(NAV0 + 2e14);
+        calc.rate_w();
+        assertGt(calc.rate(), 0);
+
+        // The oldest endpoint is the constructor's seed in ring slot 0, the contract's first
+        // storage slot: zero its NAV, keep its timestamp (bits 208+).
+        (, uint256 seedTime_) = calc.oldestCheckpoint();
+        vm.store(address(calc), bytes32(uint256(0)), bytes32(seedTime_ << 208));
+        (uint256 oldNav_,) = calc.oldestCheckpoint();
+        assertEq(oldNav_, 0, "the corruption landed where the measurement will look");
+
+        assertEq(calc.rate(), 0, "a zero denominator is no yield, not a division error");
+        assertEq(calc.apr(), 0);
+    }
+
     // --- Views ---------------------------------------------------------------------------------
 
     function test_spotNavMirrorsTheFeedAndItsFailureStates() public {
@@ -777,6 +945,37 @@ contract WsgemRateCalculatorTest is Test {
 
         pip.setMode(MockPip.Mode.REVERTING);
         assertEq(calc.spotNav(), 0);
+    }
+
+    /// @dev Below `MIN_INTERVALS` there is no far end to reach for, so `oldestCheckpoint()`
+    ///      returns the head from both ends rather than reading an unwritten slot.
+    function test_oldestCheckpointEqualsNewestBeforeMeasurability() public {
+        (uint256 oldNav_, uint256 oldTime_) = calc.oldestCheckpoint();
+        (uint256 newNav_, uint256 newTime_) = calc.newestCheckpoint();
+        assertEq(oldNav_, newNav_, "the seed alone: both ends are the head");
+        assertEq(oldTime_, newTime_);
+
+        skip(7 days);
+        pip.poke(NAV0 + 1e14);
+        calc.rate_w();
+        assertFalse(calc.measurable(), "one publication is still one short");
+        (oldNav_, oldTime_) = calc.oldestCheckpoint();
+        (newNav_, newTime_) = calc.newestCheckpoint();
+        assertEq(oldNav_, newNav_, "still the head from both ends");
+        assertEq(oldTime_, newTime_);
+    }
+
+    /// @dev Overdue and unmeasurable are independent states and every view must stay coherent
+    ///      in their intersection: a fresh calculator left silent goes overdue with nothing to
+    ///      measure, and everything reads zero rather than reaching for a window that is not
+    ///      there.
+    function test_viewsAreCoherentWhileOverdueAndUnmeasurable() public {
+        skip(GAP + 30 days);
+        assertTrue(calc.overdue(), "the seed alone can go overdue");
+        assertEq(calc.intervalsMeasured(), 0);
+        assertEq(calc.measuredSpan(), 0, "no window, no span, however overdue");
+        assertEq(calc.rate(), 0);
+        assertEq(calc.apr(), 0);
     }
 
     // --- Events ----------------------------------------------------------------------------------

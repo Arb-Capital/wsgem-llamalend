@@ -41,9 +41,20 @@ contract WsgemShimHandler is CommonBase, StdUtils {
     ///         across the measured window.
     bool public reportedYieldWithoutGrowth;
 
+    /// @notice Set if the oracle's checkpoint clock ever moved backwards.
+    bool public cachedTimestampRegressed;
+
+    /// @notice Set if the rate-limit anchor changed while a live-zero episode was in progress.
+    ///         The floor is reported without ever being anchored, so an episode must hold the
+    ///         recovery anchor exactly where it stood when the episode began.
+    bool public anchorMovedDuringLiveZero;
+
     uint256 internal immutable NAV0;
     uint256 internal lastPrice;
     uint256 internal lastPriceTime;
+    uint256 internal lastCachedTimestamp;
+    bool    internal wasLiveZero;
+    uint256 internal episodeAnchor;
 
     constructor(
         WsgemLlamalendOracle oracle_,
@@ -51,13 +62,14 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         MockPip pip_,
         MockWsgem wsgem_
     ) {
-        ORACLE        = oracle_;
-        CALC          = calc_;
-        PIP           = pip_;
-        WSGEM         = wsgem_;
-        NAV0          = pip_.price();
-        lastPrice     = oracle_.price();
-        lastPriceTime = block.timestamp;
+        ORACLE              = oracle_;
+        CALC                = calc_;
+        PIP                 = pip_;
+        WSGEM               = wsgem_;
+        NAV0                = pip_.price();
+        lastPrice           = oracle_.price();
+        lastPriceTime       = block.timestamp;
+        lastCachedTimestamp = oracle_.cachedTimestamp();
     }
 
     // --- Actions -----------------------------------------------------------------------------
@@ -106,6 +118,40 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         _observe();
     }
 
+    /// @notice Point the wrapper's quote at a value that no longer reads the pip -- the shape of
+    ///         a broken or hostile Act proxy upgrade quoting over whatever the feed says. Zero
+    ///         clears the override.
+    function setQuoteOverride(uint256 quote_) public {
+        WSGEM.setQuoteOverride(bound(quote_, 0, type(uint128).max));
+        _observe();
+    }
+
+    /// @notice Let time pass with nobody driving the oracle: no `price_w`, no anchor movement,
+    ///         no ghost checkpoint. The untouched-market scenario `MAX_ELAPSED` exists for --
+    ///         which `_observe`'s own `price_w` call makes unreachable from every other action.
+    function drift(uint256 dt_) public {
+        vm.warp(block.timestamp + bound(dt_, 1, 30 days));
+        // Only the read-only ghost: recording anything else would re-checkpoint the very state
+        // this action exists to leave untouched. The production clock and the ghost's advance
+        // together in `_observe`, so leaving both alone here keeps the rate-limit model exact.
+        uint256 p_ = ORACLE.price();
+        if (p_ < minReportedPrice) minReportedPrice = p_;
+    }
+
+    /// @notice The other cadence regime: a per-block accumulator dripping yield in sub-hour
+    ///         steps -- the plausible future of the feed that `MIN_CHECKPOINT_SPACING` exists
+    ///         to bridge. A drip that rounds to zero is correctly not a publication.
+    function accrue(uint256 dt_, uint256 aprBps_) public {
+        uint256 step_ = bound(dt_, 1, 2 hours);
+        uint256 apr_  = bound(aprBps_, 1, 5000);
+        vm.warp(block.timestamp + step_);
+
+        uint256 nav_ = PIP.price();
+        if (nav_ == 0 || nav_ > 1e30) nav_ = 1e18; // resume accrual from a sane NAV after chaos
+        PIP.poke(nav_ + (nav_ * apr_ * step_) / (10_000 * 365 days));
+        _observe();
+    }
+
     /// @notice Advance time. Bounded well past `MAX_ELAPSED` so the elapsed-time cap is exercised.
     function warp(uint256 dt_) public {
         vm.warp(block.timestamp + bound(dt_, 1, 60 days));
@@ -141,10 +187,14 @@ contract WsgemShimHandler is CommonBase, StdUtils {
         // A LONG_RETURN read succeeds -- the shims take the first word -- so the over-report
         // check must run against it too, not be skipped as if the feed were dark. The bombs and
         // the short/reverting modes genuinely read as a pause. The oracle's spot is the
-        // redemption quote, so the ghost compares against `burncost()`, not the raw NAV.
+        // redemption quote, so the ghost compares against `burncost()`, not the raw NAV -- but
+        // only while the pip itself is live: the pip, not the quote, is the pause authority, and
+        // an overridden quote shining over a dark pip is a state the oracle rightly freezes
+        // through rather than follows.
         MockPip.Mode m_ = PIP.mode();
         bool readable_  = m_ == MockPip.Mode.NORMAL || m_ == MockPip.Mode.LONG_RETURN;
-        uint256 spot_   = readable_ ? WSGEM.burncost() : 0;
+        bool live_      = readable_ && PIP.price() != 0;
+        uint256 spot_   = live_ ? WSGEM.burncost() : 0;
         uint256 p_      = ORACLE.price();
 
         if (p_ < minReportedPrice) minReportedPrice = p_;
@@ -152,6 +202,20 @@ contract WsgemShimHandler is CommonBase, StdUtils {
 
         // The factory's check, run continuously rather than once at creation.
         if (ORACLE.price_w() != p_) priceWDiverged = true;
+
+        // The write above is the state change the checkpoint ghosts watch.
+        uint256 ts_ = ORACLE.cachedTimestamp();
+        if (ts_ < lastCachedTimestamp) cachedTimestampRegressed = true;
+        lastCachedTimestamp = ts_;
+
+        // A live-zero episode must hold the recovery anchor exactly where it stood on entry.
+        bool liveZero_ = ORACLE.liveZeroReported();
+        if (liveZero_) {
+            uint256 anchor_ = ORACLE.cachedPrice();
+            if (!wasLiveZero) episodeAnchor = anchor_;
+            else if (anchor_ != episodeAnchor) anchorMovedDuringLiveZero = true;
+        }
+        wasLiveZero = liveZero_;
 
         uint256 elapsed_ = block.timestamp - lastPriceTime;
         if (elapsed_ > ORACLE.MAX_ELAPSED()) elapsed_ = ORACLE.MAX_ELAPSED();

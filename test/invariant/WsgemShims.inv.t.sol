@@ -28,13 +28,23 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
     WsgemRateCalculator  internal calc;
     WsgemShimHandler     internal handler;
 
-    function setUp() public {
+    function setUp() public virtual {
+        _setUp(SPEED, INTERVALS, GAP, SPACING, NAV0);
+    }
+
+    /// @dev Deploys the whole rig at an arbitrary legal configuration. Every invariant below
+    ///      reads its bounds from the deployed contracts rather than the constants above, so a
+    ///      subclass overriding `setUp` reruns the entire set at the constructor's
+    ///      accept-boundaries -- see WsgemShimsEdgeConfigs.inv.t.sol.
+    function _setUp(uint256 speed_, uint256 intervals_, uint256 gap_, uint256 spacing_, uint256 nav0_)
+        internal
+    {
         vm.warp(1_800_000_000);
-        pip     = new MockPip(NAV0);
+        pip     = new MockPip(nav0_);
         gem     = new MockGem(18);
         wsgem   = new MockWsgem(address(gem), address(pip), 18);
-        oracle  = new WsgemLlamalendOracle(IWsgem(address(wsgem)), SPEED);
-        calc    = new WsgemRateCalculator(IWsgem(address(wsgem)), INTERVALS, GAP, SPACING);
+        oracle  = new WsgemLlamalendOracle(IWsgem(address(wsgem)), speed_);
+        calc    = new WsgemRateCalculator(IWsgem(address(wsgem)), intervals_, gap_, spacing_);
         handler = new WsgemShimHandler(oracle, calc, pip, wsgem);
 
         targetContract(address(handler));
@@ -157,6 +167,89 @@ contract WsgemShimsInvariantTest is StdInvariant, Test {
 
         (, uint256 oldTime_) = calc.oldestCheckpoint();
         (, uint256 newTime_) = calc.newestCheckpoint();
-        assertGe(newTime_ - oldTime_, n_ * SPACING, "a recorded gap undercut the floor");
+        assertGe(
+            newTime_ - oldTime_,
+            n_ * calc.MIN_CHECKPOINT_SPACING(),
+            "a recorded gap undercut the floor"
+        );
+    }
+
+    /// @notice The rate-limit anchor is never zero and its clock never runs backwards -- the
+    ///         one storage slot the oracle owns stays internally coherent through every failure
+    ///         state.
+    function invariant_theAnchorIsNeverZeroAndItsClockNeverRegresses() public view {
+        assertGt(oracle.cachedPrice(), 0, "the anchor must survive every episode nonzero");
+        assertLe(oracle.cachedTimestamp(), block.timestamp);
+        assertFalse(handler.cachedTimestampRegressed());
+    }
+
+    /// @notice A live-zero episode reports the one-wei floor without ever anchoring it: the
+    ///         recovery anchor holds exactly where it stood when the episode began.
+    /// @dev What makes recovery from a 100% spread return to the held anchor's ceiling instead
+    ///      of ratcheting up from dust -- the mechanism behind the upside limit's sole
+    ///      documented exception.
+    function invariant_aLiveZeroEpisodeNeverPoisonsTheAnchor() public view {
+        assertFalse(handler.anchorMovedDuringLiveZero());
+
+        // While the flag is up and the feed is dark or still quoting zero, the report is the
+        // floor itself. (Under a restored QUOTE the flag only clears on the next `price_w`.)
+        if (oracle.liveZeroReported() && (oracle.frozen() || oracle.quoteIsZero())) {
+            assertEq(oracle.price(), 1, "the witnessed floor holds until a real quote reports");
+        }
+    }
+
+    /// @notice `frozen()` and `quoteIsZero()` mirror the feed exactly and never overlap: the
+    ///         pip alone decides a freeze, the quote alone decides a live zero.
+    function invariant_theFailureStateViewsMirrorTheFeed() public view {
+        MockPip.Mode m_ = pip.mode();
+        bool readable_  = m_ == MockPip.Mode.NORMAL || m_ == MockPip.Mode.LONG_RETURN;
+        bool live_      = readable_ && pip.price() != 0;
+
+        assertEq(oracle.frozen(), !live_, "frozen() must read the pip and nothing else");
+        if (live_) {
+            assertEq(oracle.quoteIsZero(), wsgem.burncost() == 0, "a live pip defers to the quote");
+        } else {
+            assertFalse(oracle.quoteIsZero(), "a dark feed is a freeze, never the zero-quote state");
+        }
+    }
+
+    /// @notice `apr()` is exactly `rate()` annualised, saturating instead of overflowing --
+    ///         under every configuration and feed state the run can produce.
+    function invariant_aprIsTheSaturatingAnnualisationOfRate() public view {
+        uint256 r_ = calc.rate();
+        if (r_ == 0) {
+            assertEq(calc.apr(), 0);
+        } else if (r_ <= type(uint256).max / 365 days) {
+            assertEq(calc.apr(), r_ * 365 days, "below saturation the annualisation is exact");
+        } else {
+            assertEq(calc.apr(), type(uint256).max, "past it the view saturates, never wraps");
+        }
+    }
+
+    /// @notice `spotNav()` is the feed reading clamped at the storage bound, and zero through
+    ///         every unreadable shape.
+    function invariant_spotNavMirrorsTheFeed() public view {
+        MockPip.Mode m_ = pip.mode();
+        bool readable_  = m_ == MockPip.Mode.NORMAL || m_ == MockPip.Mode.LONG_RETURN;
+        uint256 raw_    = pip.price();
+        uint256 expected_ =
+            readable_ ? (raw_ > type(uint208).max ? uint256(type(uint208).max) : raw_) : 0;
+        assertEq(calc.spotNav(), expected_);
+    }
+
+    /// @notice `overdue()` flips exactly at the strict boundary, and the measured span is the
+    ///         endpoint span plus exactly the overdue excess -- never approximately.
+    function invariant_overdueAgreesWithTheSpanExtension() public view {
+        (, uint256 newTime_) = calc.newestCheckpoint();
+        uint256 due_ = newTime_ + calc.MAX_PUBLICATION_GAP();
+        assertEq(calc.overdue(), block.timestamp > due_, "overdue is the strict boundary");
+
+        uint256 n_ = calc.intervalsMeasured();
+        if (n_ < calc.MIN_INTERVALS()) return;
+
+        (, uint256 oldTime_) = calc.oldestCheckpoint();
+        uint256 expected_ = newTime_ - oldTime_;
+        if (block.timestamp > due_) expected_ += block.timestamp - due_;
+        assertEq(calc.measuredSpan(), expected_, "the span extends by exactly the excess");
     }
 }

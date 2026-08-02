@@ -19,7 +19,25 @@ test        :; forge test --no-match-path "test/fork/*" -vv
 # Fork tests. Hard-fails without a mainnet RPC rather than silently passing.
 test-fork   :; ./scripts/forge_test_fork.sh
 
-coverage    :; forge coverage --no-match-path "test/fork/*"
+# Coverage. Fork tests stay excluded for the same reason as `test`. The report is filtered to
+# src/ -- the suite and the deploy scripts are not the audited surface. The gas bench is excluded
+# from the RUN, not just the report: coverage builds are instrumented with the optimizer off, so
+# it would overwrite snapshots/WsgemGasBench.json with meaningless numbers, and it exercises no
+# path the functional suites do not. The local invariant suite is fast (no RPC) and stays in.
+COVERAGE_EXCLUDE := (test/|script/)
+COVERAGE_SKIP    := (GasBench)
+COVERAGE_ARGS    := --no-match-path "test/fork/*" --no-match-coverage "$(COVERAGE_EXCLUDE)" --no-match-contract "$(COVERAGE_SKIP)"
+
+coverage    :; forge coverage $(COVERAGE_ARGS)
+
+# Full HTML report into docs/coverage-report/ (gitignored). Regenerates lcov.info. Needs lcov's
+# genhtml.
+gen-report  :; forge coverage $(COVERAGE_ARGS) --report lcov && genhtml lcov.info --output-directory docs/coverage-report
+
+# Serve the report at http://localhost:8000 -- a Flatpak/Snap browser opening index.html directly
+# routes through the xdg document portal, which shares only that one file with the sandbox and so
+# drops the report's CSS/images.
+serve-report :; python3 -m http.server 8000 --directory docs/coverage-report
 
 # Keyless forge-script invocations (dry runs) must strip every wallet-resolving env var a previous
 # deploy session may have left exported. forge binds ETH_FROM/--sender, ETH_KEYSTORE/--keystore,
@@ -96,5 +114,5 @@ market-deploy :
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
 
-.PHONY: all deps build clean sizes fmt test test-fork coverage \
+.PHONY: all deps build clean sizes fmt test test-fork coverage gen-report serve-report \
 	oracle-dry oracle-deploy market-dry market-deploy
