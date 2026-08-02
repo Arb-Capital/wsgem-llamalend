@@ -30,3 +30,6 @@ docs/coverage-report/
 keystore/
 keystore*.json
 UTC--*
+
+# LLM
+.grok/
