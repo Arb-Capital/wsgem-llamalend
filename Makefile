@@ -81,14 +81,19 @@ endef
 
 # The forge lines are @-silenced: make would otherwise echo the expanded recipe, and the recipe
 # contains ETH_RPC_URL -- which for most providers embeds an API key -- into any log of the run.
+#
+# Every dry run and deploy below starts from `make clean`: forge script broadcasts whatever
+# artifact sits in out/, and a stale one -- built from other source or other compiler settings --
+# deploys silently. The clean ties the broadcast bytecode to the current tree, at the cost of a
+# full rebuild. The dry runs pay it too, so a dry run rehearses exactly what the deploy will do.
 oracle-dry  :
 	@$(call require_rpc)
-	@make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPOracleScript \
+	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPOracleScript \
 		--rpc-url ${ETH_RPC_URL} -vvvv
 
 oracle-deploy :
 	@$(call require_deploy_env)
-	make build
+	make clean && make build
 	@forge script script/WstGBP.s.sol:WstGBPOracleScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
@@ -104,12 +109,12 @@ oracle-deploy :
 
 market-dry  :
 	@$(call require_rpc)
-	@make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
+	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url ${ETH_RPC_URL} -vvvv
 
 market-deploy :
 	@$(call require_deploy_env)
-	make build
+	make clean && make build
 	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
