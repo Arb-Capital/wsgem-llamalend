@@ -261,10 +261,13 @@ contract WsgemMarketLifecycleForkTest is Test {
 
     // --- Modelling a publication that steps: what it costs, and what damping it would cost --------
     //
-    // Michael Egorov, reviewing this repo: "need to smoothen redemption rate: donation attacks in
-    // llamma are possible if majority of tvl sits as collateral". The precedent is LlamaLend
-    // sDOLA-long2 (2 March 2026), where an oracle reading a spot ERC-4626 `convertToAssets()` was
-    // moved ~13.8% atomically and 27 borrowers were hard-liquidated.
+    // A donation attack against a Llamalend market inflates the collateral's redemption rate and
+    // takes the book through hard liquidation. The precedent is LlamaLend sDOLA-long2
+    // (2 March 2026): an oracle reading a spot ERC-4626 `convertToAssets()` was moved ~13.8%
+    // atomically and 27 borrowers were hard-liquidated for ~822k crvUSD of seized equity. It is
+    // worst where the market holds most of the collateral's supply -- there, one trade both
+    // soft-liquidates the book and captures the float whose redemption shrinks the denominator
+    // the donation then moves. Post-mortem: gov.curve.finance, "LlamaLend sDOLA-long2".
     //
     // A wsgem has no share/asset ratio to donate into -- `IWsgem` is deliberately not ERC-4626 --
     // so that attack has no entry point here. What it does have is the SHAPE the attack exploits:
