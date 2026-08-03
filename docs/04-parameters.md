@@ -94,10 +94,18 @@ The 0.11 bp figure is measured, not claimed:
 hour. Against a 100 bp liquidation discount, that is the entire cost of the limit.
 
 **What it is not for.** It is not frontrunning protection — a 25 bp redemption spread already
-dominates a 6.8 bp step, so nobody races a publication. It is not manipulation resistance in
-Curve's sense either: `ERC4626EMAWrapper` smooths because `convertToAssets` is a ratio anyone can
-move with a donation in the same block, whereas a published NAV is not movable by anyone except the
-key that publishes it.
+dominates a 6.8 bp step, so nobody races a publication.
+
+**Donation resistance comes for free, and is not why the number is what it is.** Curve's
+post-sDOLA rule is that no Llamalend oracle should permit an instantaneous price jump *for any
+reason, regardless of the technical design of the collateral*, and its recommendation list asks
+specifically for "a per-block rate-of-change cap on vault PPS readings" — which is what this is.
+The attack it was written against inflates the rate *upward*, so this speed sits on the exploited
+direction rather than beside it: replayed on a fork, the same sequence nets an attacker +217 gem
+with no cap and −41 gem with this one. It is nonetheless not *sized* for that. A wsgem has no
+`convertToAssets` and no `totalAssets()` to donate into — the quote is a published number, not a
+ratio over a balance — so sizing against the vector would mean sizing against nothing. See
+[02-oracle-shim.md](02-oracle-shim.md#donation-attacks) for the mechanism and the full table.
 
 **What it is for.** Bounding an erroneous or compromised publication, for the benefit of
 Llamalend's lenders. The realistic failure is operational — a decimals slip or a units error in
@@ -116,6 +124,11 @@ holding a different asset — and because it costs 0.11 bp.
 liquidates positions irreversibly. That asymmetry is deliberate — a genuine collapse must reach the
 market, and there is no independent price to appeal to, since redemption tracks the NAV down too —
 but it is the sharper operational risk. See [07-operations.md](07-operations.md).
+
+It is also measured. `test/fork/WsgemMarketLifecycle.fork.t.sol` runs the same book and the same
+publication against this shim and against a symmetrically damped one; at the only step size where
+anyone extracts anything, damping costs the borrower *more* (9 gem against 8) and delays
+recognition by 29 days. The asymmetry is not a gap left open for want of a reason.
 
 Rule for a different wsgem: pick the speed so one publication interval of real yield is absorbed in
 hours, not days, while a month of allowance stays far below an order-of-magnitude move.

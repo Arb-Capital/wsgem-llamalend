@@ -59,6 +59,17 @@ KEYLESS := env -u ETH_FROM -u ETH_KEYSTORE -u ETH_KEYSTORE_ACCOUNT -u ETH_PASSWO
 GAS_FLAGS := $(if $(ETH_PRIO_FEE),--priority-gas-price $(ETH_PRIO_FEE)) \
              $(if $(ETH_GAS_PRICE),--with-gas-price $(ETH_GAS_PRICE))
 
+# @-silencing hides the recipe TEXT, but cast and forge print the full RPC endpoint -- provider
+# token included -- in their own stderr diagnostics on transport errors ("error sending request
+# for url (...)"). Every network-touching cast/forge stderr below therefore streams through this
+# filter: failures stay descriptive, credentials do not survive. The filter works byte-by-byte
+# rather than line-by-line so cast's newline-free keystore password prompt still renders live.
+# The `2> >(...)` process substitution needs bash (recipes below are otherwise POSIX; bash is a
+# superset), and it leaves each command's exit status untouched -- the preflight
+# `|| { ...; exit 1; }` handlers keep working.
+SHELL  := /bin/bash
+REDACT := python3 scripts/redact_rpc_stderr.py
+
 # Guards for the variables a broadcast cannot proceed without. Tested as $${VAR} rather than
 # $(VAR) so make does not bake the value into the recipe text, where `make -n` would print it.
 define require_deploy_env
@@ -72,6 +83,15 @@ endef
 # empty ${ETH_RPC_URL} makes `--rpc-url` swallow the next flag as its argument.
 define require_rpc
 	test -n "$${ETH_RPC_URL}" || { echo "ETH_RPC_URL is required"; exit 1; }
+endef
+
+# What a plain transaction needs, which is the deploy set MINUS the Etherscan key: `cast send`
+# submits nothing to verify, so requiring a verification credential would fail an otherwise
+# perfectly good keeper configuration.
+define require_send_env
+	test -n "$${ETH_RPC_URL}"  || { echo "ETH_RPC_URL is required";                  exit 1; }; \
+	test -n "$${ETH_FROM}"     || { echo "ETH_FROM (sender address) is required";    exit 1; }; \
+	test -n "$${ETH_KEYSTORE}" || { echo "ETH_KEYSTORE (keystore path) is required"; exit 1; }
 endef
 
 # A market run without WSGEM_ORACLE deploys a FRESH oracle -- by definition an unobserved one,
@@ -106,14 +126,14 @@ endef
 oracle-dry  :
 	@$(call require_rpc)
 	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPOracleScript \
-		--rpc-url ${ETH_RPC_URL} -vvvv
+		--rpc-url ${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
 
 oracle-deploy :
 	@$(call require_deploy_env)
 	make clean && make build
 	@forge script script/WstGBP.s.sol:WstGBPOracleScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
-		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
+		$(GAS_FLAGS) --verify --slow --broadcast -vvvv 2> >($(REDACT) >&2)
 
 # --- Market ------------------------------------------------------------------------------------
 #
@@ -129,7 +149,7 @@ market-dry  :
 	@$(call require_rpc)
 	@$(call remind_oracle_reuse)
 	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
-		--rpc-url ${ETH_RPC_URL} -vvvv
+		--rpc-url ${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
 
 market-deploy :
 	@$(call require_deploy_env)
@@ -137,7 +157,7 @@ market-deploy :
 	make clean && make build
 	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
-		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
+		$(GAS_FLAGS) --verify --slow --broadcast -vvvv 2> >($(REDACT) >&2)
 
 # Resuming a partial market broadcast MUST go through this target, never a direct
 # `forge script --resume`: forge replays the saved transaction backlog without re-executing the
@@ -149,7 +169,62 @@ market-resume :
 	@$(call require_oracle)
 	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
-		$(GAS_FLAGS) --verify --slow --broadcast --resume -vvvv
+		$(GAS_FLAGS) --verify --slow --broadcast --resume -vvvv 2> >($(REDACT) >&2)
+
+# --- Keeper ------------------------------------------------------------------------------------
+#
+# Both shims are permissionless and take no arguments. Nothing breaks without this -- both views
+# compute from live state -- but a daily poke does two things: it records publications on a market
+# with no traffic of its own, and it keeps the oracle's banked upside allowance at one day's worth
+# (0.25%) instead of letting it reach MAX_ELAPSED's seven (1.75%). See docs/07-operations.md.
+#
+# WSGEM_ORACLE and WSGEM_CALC select what to poke. Run it from market creation, not from the DAO
+# vote: the borrow_cap == 0 window is exactly when nothing else is driving price_w.
+# PREFLIGHT, and why it is not optional here. A call to an address with no code SUCCEEDS on the
+# EVM -- it is indistinguishable from a function that returned nothing. So a keeper pointed at the
+# wrong chain, or at an address that is right on mainnet and empty on a fork, sends two
+# transactions, gets two green receipts, and updates neither checkpoint. A scheduled job would
+# report success forever while the banked allowance this target exists to bound kept growing.
+# The deploy targets get this from the script's own asserts; a bare `cast send` has none, so the
+# checks are here: mainnet, both addresses carry code, and both shims agree on which wsgem they
+# are for -- which is what catches a stale address from a previous instance.
+poke :
+	@$(call require_send_env)
+	@test -n "$${WSGEM_ORACLE}" || { echo "WSGEM_ORACLE is required"; exit 1; }
+	@test -n "$${WSGEM_CALC}"   || { echo "WSGEM_CALC is required";   exit 1; }
+	@# Each result is captured, its exit status checked, and its emptiness checked BEFORE any
+	@# comparison. Inlining these as `test "$$(cast ...)" != "0x"` looks equivalent and is not: a
+	@# cast that fails writes its diagnostic to stderr and nothing to stdout, so the comparison
+	@# becomes `"" != "0x"`, which is TRUE. A preflight whose whole purpose is to refuse to send
+	@# blind would then pass precisely when the RPC is unreachable. The wiring comparison degrades
+	@# the same way, into `"" = ""`.
+	@#
+	@# The reads go through KEYLESS for the same reason the dry runs do: `cast` resolves a wallet
+	@# from ETH_FROM/ETH_KEYSTORE whenever they are exported, even for an eth_call that needs
+	@# neither. An unreadable keystore then fails the READ, and the preflight reports "WSGEM()
+	@# reverted" when the contract is fine and only the signing config is wrong.
+	@chain_=$$($(KEYLESS) cast chain --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: cast chain failed -- RPC unreachable?"; exit 1; }; \
+	test "$$chain_" = "ethlive" \
+		|| { echo "ETH_RPC_URL must point at Ethereum mainnet (got: $$chain_)"; exit 1; }; \
+	for pair_ in "WSGEM_ORACLE:$${WSGEM_ORACLE}" "WSGEM_CALC:$${WSGEM_CALC}"; do \
+		name_=$${pair_%%:*}; addr_=$${pair_#*:}; \
+		code_=$$($(KEYLESS) cast code $$addr_ --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+			|| { echo "preflight: cast code failed for $$name_"; exit 1; }; \
+		case "$$code_" in ""|"0x") echo "$$name_ has no code at $$addr_"; exit 1;; esac; \
+	done; \
+	owsgem_=$$($(KEYLESS) cast call $${WSGEM_ORACLE} 'WSGEM()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: WSGEM() reverted on the oracle"; exit 1; }; \
+	cwsgem_=$$($(KEYLESS) cast call $${WSGEM_CALC} 'WSGEM()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: WSGEM() reverted on the calculator"; exit 1; }; \
+	test -n "$$owsgem_" && test -n "$$cwsgem_" \
+		|| { echo "preflight: WSGEM() returned nothing -- wrong contract?"; exit 1; }; \
+	test "$$owsgem_" = "$$cwsgem_" \
+		|| { echo "wired to different wsgems: $$owsgem_ vs $$cwsgem_"; exit 1; }
+	@cast send $(WSGEM_ORACLE) "price_w()" \
+		--rpc-url $(ETH_RPC_URL) --from $(ETH_FROM) --keystore $(ETH_KEYSTORE) $(GAS_FLAGS) 2> >($(REDACT) >&2)
+	@cast send $(WSGEM_CALC) "rate_w()" \
+		--rpc-url $(ETH_RPC_URL) --from $(ETH_FROM) --keystore $(ETH_KEYSTORE) $(GAS_FLAGS) 2> >($(REDACT) >&2)
 
 .PHONY: all deps build clean sizes fmt test test-fork coverage gen-report serve-report \
-	oracle-dry oracle-deploy market-dry market-deploy market-resume
+	oracle-dry oracle-deploy market-dry market-deploy market-resume poke

@@ -2,7 +2,9 @@
 pragma solidity ^0.8.28;
 
 import {Test}                 from "forge-std/Test.sol";
+import {console2}             from "forge-std/console2.sol";
 import {IERC20}               from "forge-std/interfaces/IERC20.sol";
+import {DownsideDampedOracle} from "../mocks/DownsideDampedOracle.sol";
 import {WsgemLlamalendOracle} from "../../src/WsgemLlamalendOracle.sol";
 import {WsgemRateCalculator}  from "../../src/WsgemRateCalculator.sol";
 import {IWsgem}               from "../../src/interfaces/IWsgem.sol";
@@ -257,6 +259,284 @@ contract WsgemMarketLifecycleForkTest is Test {
         );
     }
 
+    // --- Modelling a publication that steps: what it costs, and what damping it would cost --------
+    //
+    // Michael Egorov, reviewing this repo: "need to smoothen redemption rate: donation attacks in
+    // llamma are possible if majority of tvl sits as collateral". The precedent is LlamaLend
+    // sDOLA-long2 (2 March 2026), where an oracle reading a spot ERC-4626 `convertToAssets()` was
+    // moved ~13.8% atomically and 27 borrowers were hard-liquidated.
+    //
+    // A wsgem has no share/asset ratio to donate into -- `IWsgem` is deliberately not ERC-4626 --
+    // so that attack has no entry point here. What it does have is the SHAPE the attack exploits:
+    // a redemption quote that can step. Curve's post-sDOLA position is that a Llamalend oracle
+    // should never permit an instantaneous jump for any reason, which is direction-blind; this
+    // shim conforms upward and diverges downward on purpose. These tests price both halves of
+    // that rather than arguing either -- the attack itself against the cap and against no cap
+    // (below), and two step sizes DOWN against this shim and against a symmetrically damped one
+    // (here), which is the divergence.
+    //
+    // WHAT THIS MODEL IS AND IS NOT. Arbitrage is crude: halving chunks toward the redemption bid
+    // rather than solving for the optimal trade, one taker with fixed funding, no competition and
+    // no gas. It is enough that soft liquidation actually happens -- without traders a fork market
+    // never converts and every arm overstates the loss -- and enough to show that the greedy
+    // strategy takes nothing. It is NOT a proof that no strategy extracts value. The comparison
+    // between arms is the output; the absolute figures are indicative.
+
+    /// @dev The sDOLA-shaped move: ~13.8% of the NAV in one publication.
+    uint256 internal constant STEP_BP = 1380;
+
+    /// @dev A move sized to the liquidation band instead: big enough to put the most levered
+    ///      position under water, small enough that its collateral still covers its debt. This is
+    ///      the only window in which anyone extracts anything, and it is narrow -- measured on this
+    ///      book, 4% does not reach it and 9% is already past it into insolvency, where there is no
+    ///      equity left to seize and nobody bids at all. 13.8%, the sDOLA-sized move, overshoots it
+    ///      entirely.
+    uint256 internal constant SMALL_STEP_BP = 700;
+
+    /// @dev Daily ticks -- 0.25% a tick against a ~35 bp band at A = 285, so soft liquidation gets
+    ///      band-scale granularity -- capped well past the ~55 days a 13.8% fall takes.
+    uint256 internal constant TICK      = 1 days;
+    uint256 internal constant MAX_TICKS = 120;
+
+    uint256 internal constant ARB_FUNDING   = 50_000e18;
+    uint256 internal constant ARB_CHUNK     = 64e18;
+    uint256 internal constant ARB_MIN_CHUNK = 0.01e18;
+    uint256 internal constant ARB_STEPS     = 64;
+
+    address internal arb = makeAddr("arbitrageur");
+    address[3] internal book;
+
+    /// @dev Kept in storage rather than on the stack: the report carries thirteen figures and the
+    ///      two tests that fill it are already at the stack limit.
+    struct Ledger {
+        uint256 fair0;
+        uint256 fair1;
+        uint256 book0;
+        uint256 book1;
+        uint256 vault0;
+        uint256 vault1;
+        int256  arb0;
+        int256  arb1;
+        uint256 liq0;
+        uint256 liq1;
+        uint256 open;
+        uint256 coll0;
+        uint256 coll1;
+        uint256 ammSpot;
+        uint256 ammOracle;
+        uint256 liquidated;
+        uint256 repricedInDays;
+    }
+
+    Ledger internal led;
+
+    /// @dev Pass-through, sDOLA-sized. The fall reaches the market in one block, which is also to
+    ///      say it arrives faster than soft liquidation can work.
+    function test_aStepDownIsPassedThroughAndSkipsSoftLiquidation() public {
+        _runDownStep(STEP_BP, false);
+        console2.log("--- -13.8%, pass-through (shipped) -------------------------");
+        _report();
+
+        assertEq(oracle.price(), led.fair1, "the fall reaches the market in the same block");
+        // Past the liquidation band the collateral no longer covers the debt, so no rational
+        // liquidator bids and the shortfall simply sits there. That is the honest bad outcome of
+        // a step this size, and it is the SAME outcome damped -- see the comparison below.
+        assertEq(led.liquidated, 0, "nobody liquidates a position that cannot repay");
+        assertGt(led.open, 0, "so the shortfall stays open");
+    }
+
+    /// @dev The counterfactual: the same fall, the same positions, the same arbitrage, metered out
+    ///      at the same 0.25%/day the upside already carries.
+    function test_theSameStepDampedGivesSoftLiquidationTimeToWork() public {
+        _runDownStep(STEP_BP, true);
+        console2.log("--- -13.8%, damped at 0.25%/day (counterfactual) -----------");
+        _report();
+        assertLt(led.repricedInDays, (MAX_TICKS * TICK) / 1 days, "the descent must complete");
+    }
+
+    /// @dev Pass-through at liquidation-band size. This is the sDOLA extraction shape: positions
+    ///      under water but still solvent, so a liquidator bids and the borrower pays the discount.
+    function test_aSmallStepDownIsWhereABorrowerActuallyPays() public {
+        _runDownStep(SMALL_STEP_BP, false);
+        console2.log("--- -7%, pass-through (shipped) ----------------------------");
+        _report();
+
+        assertGt(led.liquidated, 0, "this step size must reach the liquidation band");
+        assertGt(led.book0, led.book1, "and the borrower must pay for being in it");
+        assertEq(led.open, 0, "solvent, so nothing is left unbacked");
+        // The discount is a transfer, not a burn: what the borrower loses the liquidator takes.
+        assertApproxEqRel(
+            led.liq1 - led.liq0, led.book0 - led.book1, 0.25e18, "loss must land on the liquidator"
+        );
+    }
+
+    /// @dev The same, damped. Whether metering the fall keeps a borrower out of the liquidation
+    ///      band, or just delays it there, is the question the asymmetry turns on.
+    function test_theSameSmallStepDamped() public {
+        _runDownStep(SMALL_STEP_BP, true);
+        console2.log("--- -7%, damped at 0.25%/day (counterfactual) --------------");
+        _report();
+
+        assertGt(led.liquidated, 0, "damping delays the liquidation, it does not avoid it");
+        assertGt(led.repricedInDays, 7, "and it costs weeks of unrecognised loss to do so");
+    }
+
+    /// @dev The comparison the docs rest on, asserted rather than printed. Both arms run in one
+    ///      test against one market state, so the difference cannot be an artefact of two setUps.
+    /// @dev `led` is storage and resets with the revert; the two figures carried across it are
+    ///      locals, which live in this call frame and are untouched by a state revert.
+    function test_dampingTheDownsideDoesNotProtectTheBorrower() public {
+        uint256 snap_ = vm.snapshotState();
+
+        _runDownStep(SMALL_STEP_BP, false);
+        uint256 passLoss_ = led.book0 - led.book1;
+        uint256 passLiq_  = led.liquidated;
+
+        vm.revertToState(snap_);
+
+        _runDownStep(SMALL_STEP_BP, true);
+        uint256 dampLoss_ = led.book0 - led.book1;
+
+        console2.log("--- -7%: pass-through vs damped, one market state ----------");
+        console2.log("  borrower loses, pass-through (gem) :", passLoss_ / 1e18);
+        console2.log("  borrower loses, damped       (gem) :", dampLoss_ / 1e18);
+        console2.log("  days the damped arm took           :", led.repricedInDays);
+
+        assertGt(passLiq_, 0, "the control must reach the liquidation band, or this proves nothing");
+        assertGe(
+            dampLoss_, passLoss_, "damping the downside must not be sold as protecting the borrower"
+        );
+        assertGt(led.repricedInDays, 7, "and what it does buy is weeks of unrecognised loss");
+    }
+
+    /// @dev One scenario, two oracles. Same book, same publication, same takers; the only
+    ///      difference is whether the fall arrives in a block or over weeks.
+    function _runDownStep(uint256 stepBp_, bool damped_) internal {
+        DownsideDampedOracle shim_;
+        if (damped_) {
+            shim_ = new DownsideDampedOracle(IWsgem(WSGEM), cfg.MAX_UPSIDE_SPEED());
+            vm.prank(dao);
+            IConfigurator(CONFIGURATOR).set_price_oracle(
+                address(controller), address(shim_), 0.01e18
+            );
+            assertEq(amm.price_oracle_contract(), address(shim_), "the market must follow the swap");
+        }
+
+        led.fair0 = _openBook();
+        _fundTakers();
+
+        _setNav((IWsgem(WSGEM).navprice() * (10_000 - stepBp_)) / 10_000);
+        led.fair1 = IWsgem(WSGEM).burncost();
+        _mark(true);
+
+        if (!damped_) {
+            _arbToward(led.fair1);
+            led.liquidated = _liquidateUnderwater();
+        } else {
+            assertGt(shim_.price(), led.fair1, "a damped oracle holds above the fallen quote");
+
+            uint256 ticks_;
+            while (shim_.price() > led.fair1 && ticks_ < MAX_TICKS) {
+                vm.warp(block.timestamp + TICK);
+                shim_.price_w();
+                _arbToward(led.fair1);
+                led.liquidated += _liquidateUnderwater();
+                ++ticks_;
+            }
+            led.repricedInDays = (ticks_ * TICK) / 1 days;
+        }
+
+        _mark(false);
+    }
+
+    // --- The sDOLA attack, replayed in shape -------------------------------------------------------
+    //
+    // The post-mortem's mechanism, which is not the one intuition suggests. Inflating the oracle
+    // UP is what liquidated 27 borrowers, and it only works after a separate step:
+    //
+    //   1. One permissionless `exchange()` dumps borrowed-token into the AMM and buys the
+    //      collateral out of every occupied band, leaving the bands holding gem. That is
+    //      soft-liquidation, done deliberately and at a loss. On its own it liquidates nobody --
+    //      health IMPROVES, because the bands now hold the borrowed asset.
+    //   2. The redemption rate is inflated. On its own this liquidates nobody either: a higher
+    //      collateral price is a healthier position.
+    //
+    // Together they are lethal, because `get_x_down` values a soft-liquidated band by asking what
+    // its gem would buy back at the current oracle -- and that round trip carries `p_o` CUBED in
+    // the DENOMINATOR (AMM.vy: `p_o**2 / p_o_down * p_o / p_o_up`). A 1.3% rate rise cost the
+    // sDOLA book ~4 points of health. Positions sitting on 0.3-0.8% margin went straight under.
+    //
+    // Two arms below, and the attacker is handed the rate move FOR FREE in both -- no donation,
+    // no supply capture, no cost for the half of the attack a wsgem has no path to at all. What
+    // is measured is whether the remainder pays once its expensive half is removed.
+
+    /// @dev ~13.79%: the sDOLA rate move, 1.189 -> 1.353.
+    uint256 internal constant INFLATE_BP = 1379;
+
+    /// @dev Enough gem to buy the whole book's collateral out of its bands.
+    uint256 internal constant DUMP = 10_000e18;
+
+    /// @dev The shipped cap admits 0.25%/day, so step 2 lands as nothing and the attacker is left
+    ///      holding the cost of step 1.
+    function test_theSdolaAttackShapeIsUnprofitableUnderTheCap() public {
+        _runInflationAttack(true);
+        console2.log("--- sDOLA attack shape, capped at 0.25%/day (shipped) ------");
+        _report();
+
+        assertEq(led.liquidated, 0, "the cap must leave nothing to liquidate");
+        assertLt(led.arb1, led.arb0, "and the attacker must be out of pocket for trying");
+    }
+
+    /// @dev The same sequence with no cap: the sDOLA oracle's behaviour, on this book.
+    /// @dev These two assertions are what make the capped arm mean anything. A model in which the
+    ///      attack fails everywhere proves only that the model is broken, so the control has to
+    ///      reproduce the attack before the treatment is allowed to refute it.
+    function test_theSameAttackShapeUncappedIsWhatTheCapIsWorth() public {
+        _runInflationAttack(false);
+        console2.log("--- sDOLA attack shape, uncapped (control) -----------------");
+        _report();
+
+        assertGt(led.liquidated, 0, "uncapped, the attack must take a position");
+        assertGt(led.arb1, led.arb0, "uncapped, the attack must pay -- net of step 1's cost");
+    }
+
+    /// @dev One sequence, two oracles. `capped_ == false` swaps in an oracle with no limit in
+    ///      either direction, which is the sDOLA market's behaviour for this purpose.
+    function _runInflationAttack(bool capped_) internal {
+        if (!capped_) {
+            DownsideDampedOracle open_ = new DownsideDampedOracle(IWsgem(WSGEM), 0);
+            vm.prank(dao);
+            IConfigurator(CONFIGURATOR).set_price_oracle(
+                address(controller), address(open_), 0.01e18
+            );
+        }
+
+        led.fair0 = _openBook();
+        deal(GEM, arb, ARB_FUNDING);
+        vm.startPrank(arb);
+        IERC20(GEM).approve(address(amm), type(uint256).max);
+        IERC20(GEM).approve(address(controller), type(uint256).max);
+        IERC20(WSGEM).approve(address(amm), type(uint256).max);
+        vm.stopPrank();
+
+        led.fair1 = led.fair0;
+        _mark(true);
+
+        // Step 1: buy the book's collateral out of its bands. Deliberately unprofitable.
+        vm.prank(arb);
+        IAMMExchange(address(amm)).exchange(0, 1, DUMP, 0);
+        led.coll1 = _bookCollateral(); // reused as the post-dump reading; _mark(false) overwrites
+
+        // Step 2: the rate moves up. Free, in this model.
+        _setNav((IWsgem(WSGEM).navprice() * (10_000 + INFLATE_BP)) / 10_000);
+        led.fair1 = IWsgem(WSGEM).burncost();
+        led.ammOracle = amm.price_oracle();
+
+        // Step 3: take the book.
+        led.liquidated = _liquidateUnderwaterBy(arb);
+        _mark(false);
+    }
+
     /// @dev The freeze design's whole justification: a paused feed must leave repayment,
     ///      borrowing and trading alive on the held price rather than bricking the market.
     function test_aMidLifeFreezeKeepsTheMarketServiceable() public {
@@ -468,6 +748,214 @@ contract WsgemMarketLifecycleForkTest is Test {
 
         assertLt(navRead_ * 10, oracle.PIP_READ_GAS(), "cap must be >= 10x the NAV read");
         assertLt(quoteRead_ * 10, oracle.PIP_READ_GAS(), "cap must be >= 10x the quote read");
+    }
+
+    // --- Helpers for the downside model -------------------------------------------------------------
+
+    /// @notice Deposit liquidity once and open three loans at 60/80/95% of max. Returns the
+    ///         redemption quote they were opened against.
+    function _openBook() internal returns (uint256 fair_) {
+        book = [borrower, makeAddr("borrower-b"), makeAddr("borrower-c")];
+        uint256[3] memory pct_ = [uint256(60), 80, 95];
+
+        vm.startPrank(lender);
+        IERC20(GEM).approve(address(vault), type(uint256).max);
+        vault.deposit(LIQUIDITY, lender);
+        vm.stopPrank();
+
+        for (uint256 i_; i_ < book.length; ++i_) {
+            address who_ = book[i_];
+            deal(WSGEM, who_, COLLATERAL);
+
+            uint256 max_ = controller.max_borrowable(COLLATERAL, N_BANDS, who_);
+            vm.startPrank(who_);
+            IERC20(WSGEM).approve(address(controller), type(uint256).max);
+            IERC20(GEM).approve(address(controller), type(uint256).max);
+            controller.create_loan(COLLATERAL, (max_ * pct_[i_]) / 100, N_BANDS, who_, address(0), "");
+            vm.stopPrank();
+        }
+        fair_ = IWsgem(WSGEM).burncost();
+    }
+
+    /// @dev Fund and approve both takers up front. Their P&L is only readable if their balances
+    ///      are set once rather than topped up per trade.
+    function _fundTakers() internal {
+        deal(GEM, arb, ARB_FUNDING);
+        deal(WSGEM, arb, ARB_FUNDING);
+        vm.startPrank(arb);
+        IERC20(GEM).approve(address(amm), type(uint256).max);
+        IERC20(WSGEM).approve(address(amm), type(uint256).max);
+        vm.stopPrank();
+
+        deal(GEM, liquidator, ARB_FUNDING);
+        vm.prank(liquidator);
+        IERC20(GEM).approve(address(controller), type(uint256).max);
+    }
+
+    /// @notice Walk the AMM toward the redemption bid, keeping only the trades that actually pay.
+    /// @dev Crude on purpose -- see the note above the tests. `coins(0)` is the borrowed gem and
+    ///      `coins(1)` the collateral, so `exchange(0, 1, ...)` buys collateral and
+    ///      `exchange(1, 0, ...)` sells it.
+    ///
+    ///      Two properties matter, and the model is wrong without either.
+    ///
+    ///      Every chunk is executed against a snapshot and rolled back unless it raised the
+    ///      arbitrageur's net worth marked at the redemption bid. Without that test the loop is
+    ///      not an arbitrageur at all: LLAMMA's dynamic fee scales with how far the oracle has
+    ///      just moved -- the `1 - r**3` term, which a 13.8% step drives into the tens of percent
+    ///      -- so a loop that trades merely because the price is out of line hands the fee to the
+    ///      borrowers whose bands it is trading against and reports its own loss as extraction.
+    ///
+    ///      And the size halves rather than giving up. A fixed chunk large enough to matter after
+    ///      a 13.8% step is far too large for the 25 bp a damped oracle moves in a day: it
+    ///      overshoots, prices as unprofitable, and the model then reports that no arbitrage
+    ///      exists in the arm where arbitrage is the entire mechanism being measured.
+    function _arbToward(uint256 fair_) internal {
+        uint256 chunk_ = ARB_CHUNK;
+
+        for (uint256 k_; k_ < ARB_STEPS; ++k_) {
+            uint256 p_ = amm.get_p();
+            if (p_ == 0) return;
+            if (p_ <= (fair_ * 10_010) / 10_000 && p_ >= (fair_ * 9_990) / 10_000) return;
+
+            uint256 i_     = p_ > fair_ ? 1 : 0;
+            int256  worth_ = _netWorth(arb, fair_);
+            uint256 snap_  = vm.snapshotState();
+            bool    kept_;
+
+            vm.prank(arb);
+            try IAMMExchange(address(amm)).exchange(i_, 1 - i_, chunk_, 0) returns (
+                uint256[2] memory got_
+            ) {
+                kept_ = got_[1] > 0 && _netWorth(arb, fair_) > worth_;
+            } catch {
+                kept_ = false;
+            }
+
+            if (kept_) continue;
+
+            vm.revertToState(snap_);
+            chunk_ /= 2;
+            if (chunk_ < ARB_MIN_CHUNK) return;
+        }
+    }
+
+    /// @notice Everything `who_` owns, valued in gem at `p_`, net of debt: wallet balances plus
+    ///         whatever the AMM is holding on their behalf.
+    function _netWorth(address who_, uint256 p_) internal view returns (int256) {
+        uint256[4] memory s_ = controller.user_state(who_);
+        uint256 assets_ = IERC20(GEM).balanceOf(who_) + (IERC20(WSGEM).balanceOf(who_) * p_) / 1e18
+            + (s_[0] * p_) / 1e18 + s_[1];
+        return int256(assets_) - int256(controller.debt(who_));
+    }
+
+    /// @notice The book's equity, each position floored at zero.
+    /// @dev The floor is what makes this a measure of what BORROWERS lose. Below zero the loss has
+    ///      stopped being theirs -- a debt larger than the collateral behind it is cleared at the
+    ///      lender's expense, and clearing it registers as a borrower "gain" if the sum is taken
+    ///      raw. That leg is counted where it lands, in `vault.totalAssets()`.
+    function _bookEquity(uint256 p_) internal view returns (uint256 total_) {
+        for (uint256 i_; i_ < book.length; ++i_) {
+            int256 w_ = _netWorth(book[i_], p_);
+            if (w_ > 0) total_ += uint256(w_);
+        }
+    }
+
+    /// @notice Debt still open and no longer covered by the position behind it.
+    /// @dev Only counts positions that are still open. Once a shortfall is liquidated through it
+    ///      is realised against the vault, and `vault.totalAssets()` is where it shows up.
+    function _openShortfall(uint256 p_) internal view returns (uint256 bad_) {
+        for (uint256 i_; i_ < book.length; ++i_) {
+            uint256[4] memory s_ = controller.user_state(book[i_]);
+            uint256 backing_     = (s_[0] * p_) / 1e18 + s_[1];
+            uint256 debt_        = controller.debt(book[i_]);
+            if (debt_ > backing_) bad_ += debt_ - backing_;
+        }
+    }
+
+    /// @notice Hard-liquidate every under-water position a liquidator would actually take.
+    /// @dev The profitability test matters as much here as it does in `_arbToward`, and for a
+    ///      sharper reason. Funding a liquidator on demand and letting it pay whatever
+    ///      `tokens_to_liquidate` asks makes it buy collateral above the redemption bid -- it
+    ///      absorbs the shortfall itself, and the model then reports a market where nobody lost
+    ///      anything. A position nobody will liquidate is the actual outcome: it stays open, and
+    ///      it shows up in `_openShortfall`.
+    function _liquidateUnderwater() internal returns (uint256 n_) {
+        return _liquidateUnderwaterBy(liquidator);
+    }
+
+    function _liquidateUnderwaterBy(address taker_) internal returns (uint256 n_) {
+        uint256 fair_ = IWsgem(WSGEM).burncost();
+
+        for (uint256 i_; i_ < book.length; ++i_) {
+            address who_ = book[i_];
+            if (!controller.loan_exists(who_)) continue;
+            if (controller.health(who_, true) >= 0) continue;
+            if (controller.tokens_to_liquidate(who_, 1e18) > IERC20(GEM).balanceOf(taker_)) {
+                continue;
+            }
+
+            uint256 worth_ = _plainWorth(taker_, fair_);
+            uint256 snap_  = vm.snapshotState();
+
+            vm.prank(taker_);
+            try controller.liquidate(who_, 0, 1e18) {
+                if (_plainWorth(taker_, fair_) <= worth_) {
+                    vm.revertToState(snap_);
+                    continue;
+                }
+                ++n_;
+            } catch {
+                vm.revertToState(snap_);
+            }
+        }
+    }
+
+    /// @dev How much collateral the book still holds in the AMM. Soft liquidation converts it to
+    ///      gem, so a figure that does not move means the model produced no soft liquidation.
+    function _bookCollateral() internal view returns (uint256 total_) {
+        for (uint256 i_; i_ < book.length; ++i_) total_ += controller.user_state(book[i_])[0];
+    }
+
+    /// @dev Wallet-only worth, for the two actors that never hold a position.
+    function _plainWorth(address who_, uint256 p_) internal view returns (uint256) {
+        return IERC20(GEM).balanceOf(who_) + (IERC20(WSGEM).balanceOf(who_) * p_) / 1e18;
+    }
+
+    /// @dev Whole gem units. The comparison between the two arms is the output, not the precision.
+    ///      Everything is marked at the same post-step quote in both arms, so the mark-to-market
+    ///      move itself cancels and what is left is what the episode cost.
+    function _mark(bool before_) internal {
+        if (before_) {
+            led.book0  = _bookEquity(led.fair1);
+            led.vault0 = vault.totalAssets();
+            led.arb0   = _netWorth(arb, led.fair1);
+            led.liq0   = _plainWorth(liquidator, led.fair1);
+            led.coll0  = _bookCollateral();
+            led.ammSpot   = amm.get_p();
+            led.ammOracle = amm.price_oracle();
+        } else {
+            led.book1  = _bookEquity(led.fair1);
+            led.vault1 = vault.totalAssets();
+            led.arb1   = _netWorth(arb, led.fair1);
+            led.liq1   = _plainWorth(liquidator, led.fair1);
+            led.open   = _openShortfall(led.fair1);
+            led.coll1  = _bookCollateral();
+        }
+    }
+
+    function _report() internal view {
+        console2.log("  quote before / after  (wad) :", led.fair0, led.fair1);
+        console2.log("  borrower equity lost  (gem) :", (int256(led.book0) - int256(led.book1)) / 1e18);
+        console2.log("  lender assets lost    (gem) :", (int256(led.vault0) - int256(led.vault1)) / 1e18);
+        console2.log("  taker net             (gem) :", (led.arb1 - led.arb0) / 1e18);
+        console2.log("  liquidator gain       (gem) :", (int256(led.liq1) - int256(led.liq0)) / 1e18);
+        console2.log("  amm spot at the mark  (wad) :", led.ammSpot);
+        console2.log("  oracle the amm sees   (wad) :", led.ammOracle);
+        console2.log("  collateral in bands   (wsg) :", led.coll0 / 1e18, led.coll1 / 1e18);
+        console2.log("  shortfall still open  (gem) :", led.open / 1e18);
+        console2.log("  positions liquidated        :", led.liquidated);
+        console2.log("  days to fully reprice       :", led.repricedInDays);
     }
 
     // --- Helpers ------------------------------------------------------------------------------------

@@ -126,6 +126,48 @@ any of the three changes who holds the levers above and should be tied to a know
 action. The monetary policy's `parameters()` likewise reports the live rate curve, so a
 `set_parameters` call is observable there.
 
+## The keeper
+
+Both shims are permissionless and both take no arguments. A daily poke of each is the whole job:
+
+```bash
+cast send $ORACLE "price_w()" --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+cast send $CALC   "rate_w()"  --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+```
+
+or `make poke`. Nothing breaks without it — both views compute from live state — but two things
+improve with it, and one of them is a bound worth stating outright.
+
+**`rate_w()`: observing publications on an idle market.** A checkpoint is only recorded when
+something calls the calculator, so on a market with no traffic a publication can pass unobserved and
+the measurement window falls behind the feed. This is the standing version of the **Checkpoint
+missed** alarm above, which otherwise only gets noticed after the fact.
+
+**`price_w()`: keeping the rate limit's banked allowance small.** The upside ceiling is measured
+from the last `price_w`, capped at `MAX_ELAPSED` = 7 days:
+
+```
+ceiling = cachedPrice × (1 + MAX_UPSIDE_SPEED × min(elapsed, MAX_ELAPSED))
+```
+
+So allowance accrues while nothing calls the write path. At the configured 0.25%/day a full seven
+idle days bank **1.75%**, and the next `price_w` may report that much higher in a single block. That
+is the one instantaneous jump this design still permits, and it is worth sizing honestly: LLAMMA's
+band price scales with the cube of the oracle price, so 1.75% at the oracle is roughly **5.3%** in
+the AMM's internal price, against a 1% liquidation discount, a 1.3% loan discount and ~35 bp bands
+at A = 285.
+
+A daily poke reduces the worst case from 1.75% to **0.25%**. It costs one transaction a day.
+
+The window this matters most in is the one where nothing else is driving `price_w`: the entire
+`borrow_cap == 0` period between market creation and the DAO vote — the same idleness the
+publication alarm above is keyed around. Start the keeper at market creation, not at the vote.
+
+Note the allowance cannot be gamed in the other direction either. Calling `price_w` *more* often
+approaches continuous compounding against simple interest — a gap bounded by `e^x` versus `1 + x`,
+under 1 bp over a day — so a keeper cannot ratchet the price up faster than a lazy market would.
+`test_frequentCallsBuyAlmostNoExtraAllowance` pins that.
+
 ## Incident response
 
 ### The feed is paused

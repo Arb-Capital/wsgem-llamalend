@@ -41,14 +41,14 @@ constants, done.
 | `script/bytecode/` | Curve's `HyperbolicDynamicMP`, compiled, with provenance and two verification paths. |
 | `docs/` | The runbook. Numbered, ordered, meant to be worked through. |
 | `test/WsgemRateMath.t.sol` | Arithmetic hardening: an independent reference model, boundaries, saturation, ring indices. |
-| `test/fork/` | The real gate: live feed, real `LendFactory`, real market creation. |
+| `test/fork/` | The real gate: live feed, real `LendFactory`, real market creation — plus what a stepping publication actually costs, measured against a symmetrically damped counterfactual. |
 
 ## Quick start
 
 ```bash
 make deps && make build
 make test          # 210 unit + invariant tests, no RPC
-make test-fork     # 38 tests against live mainnet state (needs ETH_RPC_URL)
+make test-fork     # 45 tests against live mainnet state (needs ETH_RPC_URL)
 
 make coverage      # first-party src coverage summary to the terminal
 make gen-report    # + HTML report into docs/coverage-report/ (gitignored; needs lcov)
