@@ -105,9 +105,14 @@ An unset (or empty) `WSGEM_ORACLE` makes the script deploy a **fresh oracle in t
 which is by definition an unobserved one. That is allowed only as a simulation: `make market-dry`
 prints a reminder and rehearses the from-scratch pipeline, while a broadcast is refused twice
 over — `make market-deploy` fails on a named check before building anything, and the script
-itself reverts on any `--broadcast` (or `--resume`) without the variable, however it is invoked.
-The order is not optional: the oracle exists and has been observed **before** the market is
-created on it.
+itself reverts on any `--broadcast` without the variable, however it is invoked. The order is
+not optional: the oracle exists and has been observed **before** the market is created on it.
+
+Resuming a partial market broadcast is the one path the script cannot police: `--resume` replays
+the saved transaction backlog without re-executing the script, so no Solidity check runs. Use
+`make market-resume`, which re-applies the `WSGEM_ORACLE` guard before invoking forge — and never
+call `forge script --resume` directly. (A backlog can only exist if the run that generated it
+passed the guard, so this closes the loop rather than patching a live hole.)
 
 If `WSGEM_ORACLE` is set, the script validates it **before broadcasting anything** — its wsgem,
 gem, feed, configured speed, that it is not frozen, and that `price_w()` agrees with `price()`. That

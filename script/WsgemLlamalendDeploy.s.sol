@@ -216,7 +216,14 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         // No WSGEM_ORACLE means this run deploys a fresh oracle -- by definition an unobserved
         // one. That is a rehearsal convenience, not a deployable state: the documented order is
         // oracle first, market only after the oracle has been watched across a publication
-        // (docs/05 step 2). A simulation may proceed; a broadcast, however invoked, reverts here.
+        // (docs/05 step 2). A simulation may proceed; a broadcast reverts here.
+        //
+        // The ScriptResume leg cannot fire today: `forge script --resume` replays the saved
+        // transaction backlog from broadcast/ without re-executing this function, so no Solidity
+        // check can run on a resume. It is kept anyway -- it costs nothing and arms if forge ever
+        // re-executes on resume. Actual resume enforcement lives where the process starts, in the
+        // Makefile's `market-resume` target; a backlog can only exist if the run that generated
+        // it already passed this check.
         if (existing_ == address(0)) {
             require(
                 !vm.isContext(VmSafe.ForgeContext.ScriptBroadcast)

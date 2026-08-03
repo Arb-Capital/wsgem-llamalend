@@ -139,5 +139,17 @@ market-deploy :
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv
 
+# Resuming a partial market broadcast MUST go through this target, never a direct
+# `forge script --resume`: forge replays the saved transaction backlog without re-executing the
+# script, so the Solidity WSGEM_ORACLE guard cannot run on a resume. This target re-applies it
+# here instead. No clean/build -- the backlog's transactions are already fixed; a rebuild cannot
+# change what gets resumed.
+market-resume :
+	@$(call require_deploy_env)
+	@$(call require_oracle)
+	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
+		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
+		$(GAS_FLAGS) --verify --slow --broadcast --resume -vvvv
+
 .PHONY: all deps build clean sizes fmt test test-fork coverage gen-report serve-report \
-	oracle-dry oracle-deploy market-dry market-deploy
+	oracle-dry oracle-deploy market-dry market-deploy market-resume
