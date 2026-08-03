@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: read
     env:
-      ETH_FORK_BLOCK: "25647000"
+      ETH_FORK_BLOCK: "25670300"
       # The `secrets` context is not available in step-level `if:`, so surface it through `env`
       # here and condition on that instead.
       ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}

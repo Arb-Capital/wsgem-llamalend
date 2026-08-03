@@ -27,7 +27,7 @@ constants, done.
 
 | Instance | Sheet | Status |
 |---|---|---|
-| wstGBP (over tGBP) | [docs/instances/wstgbp.md](docs/instances/wstgbp.md) | simulated against mainnet, not deployed |
+| wstGBP (over tGBP) | [docs/instances/wstgbp.md](docs/instances/wstgbp.md) | oracle live at [`0xdc85…557C`](https://etherscan.io/address/0xdc85a32D5B93e040A4e84401D567DcE02237557C) (2026-08-02), observing across a publication; market not yet deployed |
 
 ## What's here
 
@@ -48,7 +48,7 @@ constants, done.
 ```bash
 make deps && make build
 make test          # 210 unit + invariant tests, no RPC
-make test-fork     # 31 tests against live mainnet state (needs ETH_RPC_URL)
+make test-fork     # 38 tests against live mainnet state (needs ETH_RPC_URL)
 
 make coverage      # first-party src coverage summary to the terminal
 make gen-report    # + HTML report into docs/coverage-report/ (gitignored; needs lcov)

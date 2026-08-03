@@ -26,7 +26,7 @@ Copy `.env.example` to `.env` (gitignored) and fill it in.
 | Variable | Required for | Notes |
 |---|---|---|
 | `ETH_RPC_URL` | deploys, `make test-fork` | Must be **archive** — the fork suite pins a block. |
-| `ETH_FORK_BLOCK` | `make test-fork` | Pinned so the RPC cache is reusable. Defaults to 25647000. |
+| `ETH_FORK_BLOCK` | `make test-fork` | Pinned so the RPC cache is reusable. Defaults to 25670300; must stay ≥ 25670242, the live oracle's deployment block. |
 | `ETH_FROM` | deploys | The deployer address. |
 | `ETH_KEYSTORE` | deploys | Path to an encrypted keystore JSON. |
 | `ETHERSCAN_API_KEY` | `--verify` | |
@@ -93,7 +93,7 @@ Full address list in [reference/addresses.md](reference/addresses.md).
 
 ```bash
 make test        # 210 unit + invariant tests, no RPC
-make test-fork   # 31 fork tests against live mainnet state
+make test-fork   # 38 fork tests against live mainnet state
 make coverage    # first-party src coverage (excludes fork tests and the gas bench)
 ```
 

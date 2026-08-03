@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console}   from "forge-std/Script.sol";
+import {VmSafe}             from "forge-std/Vm.sol";
 
 import {WsgemLlamalendOracle} from "../src/WsgemLlamalendOracle.sol";
 import {WsgemRateCalculator}  from "../src/WsgemRateCalculator.sol";
@@ -211,6 +212,18 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         address existing_ = address(0);
         string memory rawOracle_ = vm.envOr("WSGEM_ORACLE", string(""));
         if (bytes(rawOracle_).length != 0) existing_ = vm.parseAddress(rawOracle_);
+
+        // No WSGEM_ORACLE means this run deploys a fresh oracle -- by definition an unobserved
+        // one. That is a rehearsal convenience, not a deployable state: the documented order is
+        // oracle first, market only after the oracle has been watched across a publication
+        // (docs/05 step 2). A simulation may proceed; a broadcast, however invoked, reverts here.
+        if (existing_ == address(0)) {
+            require(
+                !vm.isContext(VmSafe.ForgeContext.ScriptBroadcast)
+                    && !vm.isContext(VmSafe.ForgeContext.ScriptResume),
+                "WSGEM_ORACLE is required to broadcast: deploy the oracle first, observe it across a publication, then create the market (docs/05)"
+            );
+        }
 
         // Validate a supplied oracle BEFORE broadcasting anything. `LendFactory.create` only
         // checks that the price is non-zero and that `price_w()` agrees with `price()` -- both of

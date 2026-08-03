@@ -74,6 +74,23 @@ define require_rpc
 	test -n "$${ETH_RPC_URL}" || { echo "ETH_RPC_URL is required"; exit 1; }
 endef
 
+# A market run without WSGEM_ORACLE deploys a FRESH oracle -- by definition an unobserved one,
+# and the documented order (docs/05) is oracle first, market only after observation. The dry run
+# reminds and may simulate the from-scratch pipeline; the broadcast requires the variable here,
+# and the script itself reverts on any broadcast without it, however invoked.
+define remind_oracle_reuse
+	test -n "$${WSGEM_ORACLE}" || { \
+	echo "NOTE: WSGEM_ORACLE is unset -- this SIMULATES deploying a fresh oracle and building the"; \
+	echo "      market on it. A real market deploy requires WSGEM_ORACLE (docs/05 step 3)."; }
+endef
+
+define require_oracle
+	test -n "$${WSGEM_ORACLE}" || { \
+	echo "WSGEM_ORACLE is required: the market is deployed against an oracle that already exists"; \
+	echo "and has been observed across a publication (docs/05 step 2). Deploy and observe the"; \
+	echo "oracle first, then export WSGEM_ORACLE=<address>."; exit 1; }
+endef
+
 # --- Oracle ------------------------------------------------------------------------------------
 #
 # The oracle shim is deployable on its own, ahead of the market, so its reported price can be
@@ -104,16 +121,19 @@ oracle-deploy :
 # LendFactory.create. Market creation is permissionless, but the market ships with a zero borrow
 # cap -- see docs/06-post-deployment.md.
 #
-# WSGEM_ORACLE selects an already-deployed oracle shim; unset means the script deploys a fresh
-# one in the same run.
+# WSGEM_ORACLE selects the already-deployed oracle shim. The dry run simulates a from-scratch
+# pipeline when it is unset; a broadcast requires it -- the oracle is deployed and observed
+# first, per docs/05.
 
 market-dry  :
 	@$(call require_rpc)
+	@$(call remind_oracle_reuse)
 	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url ${ETH_RPC_URL} -vvvv
 
 market-deploy :
 	@$(call require_deploy_env)
+	@$(call require_oracle)
 	make clean && make build
 	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \

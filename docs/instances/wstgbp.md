@@ -75,9 +75,16 @@ different collateral and different liquidity.
 
 | Contract | Address |
 |---|---|
-| `WsgemLlamalendOracle` | _(after 05 step 1)_ |
-| Deployed at block | _(after 05 step 1)_ |
-| Observed across a publication | _(05 step 2 — do not skip)_ |
+| `WsgemLlamalendOracle` | `0xdc85a32D5B93e040A4e84401D567DcE02237557C` |
+| Deployed at block | 25670242 (2026-08-02), tx `0x8d9da787a890c46fe52024bc424c5f6893f945dedfe8b64ebdc9a2dde9b238dc`, 745,660 gas |
+| Price at deployment | `1004861575533190669` (≈ 1.00486 gem/wsgem) — equalled the live `burncost()` exactly, per the fresh-oracle assert; post-broadcast readback confirmed `price() == spotPrice() == burncost()`, `frozen() == false`, wsgem/pip wiring correct |
+| Observed across a publication | _(05 step 2 — in progress since 2026-08-02; do not skip)_ |
+
+The live instance is under fork-test coverage:
+[`test/fork/WstGBPLiveOracle.fork.t.sol`](../../test/fork/WstGBPLiveOracle.fork.t.sol) asserts its
+wiring and the step-2 observation conditions at the pinned block, proves the deployed runtime code
+is byte-identical to this tree's build, and drills a synthetic publication, a feed pause and a
+100% spread against the deployed contract.
 
 ### Market — step 3
 

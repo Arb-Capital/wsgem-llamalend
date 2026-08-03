@@ -11,8 +11,9 @@ set -e
     exit 1
 }
 
-# Pin the fork block so the RPC cache is reusable and results are reproducible.
-export ETH_FORK_BLOCK="${ETH_FORK_BLOCK:-25647000}"
+# Pin the fork block so the RPC cache is reusable and results are reproducible. Must stay at or
+# after 25670242: the live-instance suite reads the deployed oracle, which has no code before it.
+export ETH_FORK_BLOCK="${ETH_FORK_BLOCK:-25670300}"
 
 echo "Forking mainnet at block ${ETH_FORK_BLOCK}"
 

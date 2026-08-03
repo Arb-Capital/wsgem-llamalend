@@ -81,6 +81,13 @@ tight for this wsgem's actual yield — see [04-parameters.md](04-parameters.md)
 with a looser speed rather than proceeding; it is immutable, and it is far cheaper to replace now
 than after a market points at it.
 
+`make test-fork` complements this window: the live-instance suite
+(`test/fork/WstGBPLiveOracle.fork.t.sol`) asserts the table's conditions against the deployed
+oracle at the pinned block, proves its runtime code is byte-identical to what this tree compiles,
+and drives it through a *synthetic* publication to demonstrate the absorption shape on demand.
+It does not replace the observation — a real publication through the real feed key is the thing
+being waited for — but it turns "watch it by hand" into something re-runnable.
+
 ## Step 3 — Create the market
 
 ```bash
@@ -93,6 +100,14 @@ make market-deploy            # broadcast + verify
 `--slow` is on in both deploy targets: each transaction must confirm before the next is sent,
 because the controller-address prediction depends on the factory's nonce, and the policy has to
 land before `create` references it.
+
+An unset (or empty) `WSGEM_ORACLE` makes the script deploy a **fresh oracle in the same run** —
+which is by definition an unobserved one. That is allowed only as a simulation: `make market-dry`
+prints a reminder and rehearses the from-scratch pipeline, while a broadcast is refused twice
+over — `make market-deploy` fails on a named check before building anything, and the script
+itself reverts on any `--broadcast` (or `--resume`) without the variable, however it is invoked.
+The order is not optional: the oracle exists and has been observed **before** the market is
+created on it.
 
 If `WSGEM_ORACLE` is set, the script validates it **before broadcasting anything** — its wsgem,
 gem, feed, configured speed, that it is not frozen, and that `price_w()` agrees with `price()`. That
