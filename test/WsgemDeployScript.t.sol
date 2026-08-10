@@ -29,7 +29,8 @@ contract WsgemDeployScriptTest is Test {
 
     function test_tokens() public view {
         assertEq(marketScript.WSGEM(), 0x57C3571f10767E49C9d7b60feb6c67804783B7aE, "collateral");
-        assertEq(marketScript.GEM(), 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287, "borrowed");
+        assertEq(marketScript.GEM(), 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287, "gem");
+        assertEq(marketScript.BORROWED(), marketScript.GEM(), "the gem IS what this instance borrows");
     }
 
     // --- Shim parameters ---------------------------------------------------------------------------
@@ -147,6 +148,7 @@ contract WsgemDeployScriptTest is Test {
         assertEq(oracleScript.CONFIGURATOR(), marketScript.CONFIGURATOR());
         assertEq(oracleScript.WSGEM(), marketScript.WSGEM());
         assertEq(oracleScript.GEM(), marketScript.GEM());
+        assertEq(oracleScript.BORROWED(), marketScript.BORROWED());
         assertEq(oracleScript.MAX_UPSIDE_SPEED(), marketScript.MAX_UPSIDE_SPEED());
         assertEq(oracleScript.RATE_INTERVALS(), marketScript.RATE_INTERVALS());
         assertEq(oracleScript.MAX_PUBLICATION_GAP(), marketScript.MAX_PUBLICATION_GAP());

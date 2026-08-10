@@ -89,6 +89,10 @@ ceiling = cachedPrice * (1 + MAX_UPSIDE_SPEED * min(elapsed, MAX_ELAPSED))
 reported = min(spot, ceiling)
 ```
 
+(On the cross-currency shim the anchor is `cachedQuote`, the NAV leg in gem terms, and the limit is
+applied before the conversion. Same formula, different thing anchored — see
+[The cross-currency shim](#the-cross-currency-shim).)
+
 At the configured 0.25% per day the ceiling climbs ~1.04 bp/hour, which against the observed
 cadence reads as:
 
@@ -284,6 +288,10 @@ is why it is the right default for an ERC-4626 wrapper and the wrong one here.
 
 ## Reading it in operation
 
+Same-currency shim. The cross-currency one shares every view below and adds three of its own;
+`spotPrice()` in particular means something different there, so read
+[its table](#reading-it-in-operation-1) instead if that is the market you are watching.
+
 | View | Use |
 |---|---|
 | `price()` | What the market sees. |
@@ -296,6 +304,126 @@ is why it is the right default for an ERC-4626 wrapper and the wrong one here.
 A persistent `price() < spotPrice()` means the rate limit is binding — that ordering is the exact
 signal, since a pause and a live-zero quote both read `spotPrice() == 0` with the price above it.
 In ordinary operation the limit should not bind, so that gap is the alarm to wire up.
+
+## The cross-currency shim
+
+Everything above is `src/WsgemLlamalendOracle.sol`, which prices a wsgem in **its own gem**. That is
+the case where `burncost()` already IS Llamalend's collateral-in-borrowed price, and the shim
+carries no scaling term at all. `src/WsgemFxLlamalendOracle.sol` is its sibling, for markets where
+the borrowed token is a different currency — wstGBP against crvUSD or frxUSD — and the identity
+breaks. The missing term is a foreign-exchange rate:
+
+```
+price = burncost (gem per wsgem)  x  GEM_QUOTE / BORROWED_QUOTE
+```
+
+with both quotes in the same unit of account. It is a separate contract, not a parameter: the
+deployed same-currency oracle is never redeployed, and the second storage word below is not
+something a constant can add.
+
+### Where the rate limit binds — the NAV leg, and nowhere else
+
+`MAX_UPSIDE_SPEED` exists to blunt a mistaken or hostile publication of an **administered** value: a
+decimals slip in whatever assembles the NAV off-chain. A foreign-exchange rate is not administered.
+It is traded, two-sided, and moves a percent on an ordinary day. Throttling it would guard nothing
+and would systematically under-report collateral through every rally in the collateral's currency —
+soft-liquidating healthy borrowers for the privilege.
+
+So the limit is applied to the quote BEFORE conversion, and the conversion passes through at full
+size in the same block. That is why the contract needs two storage words where the sibling needs
+one: the anchor is a **quote**, in gem terms, and the last report is a **price**, in borrowed-token
+terms. They are different numbers in different units, and the conversion between them can fail on
+its own.
+
+A consequence worth stating: a year of currency movement cannot spend the NAV leg's upside
+allowance, so a mistaken publication after a large currency move is throttled exactly as hard as one
+before it.
+
+**And a departure worth stating plainly, because a Curve reviewer will find it.** The blanket
+post-sDOLA rule quoted above — no Llamalend oracle should permit an instantaneous price jump *for
+any reason* — is satisfied by the same-currency shim and is **not** satisfied by this one. The
+conversion is unthrottled by design, and a Chainlink feed does not move continuously: it updates in
+discrete rounds, so an unthrottled round steps the reported price the moment it lands. Sized:
+
+- **Nothing caps a step, in any regime.** The deviation threshold (0.15% on GBP/USD, 0.5% on
+  frxUSD/USD) *triggers* a round; it does not bound how far the price has moved by the time one
+  lands. Calm markets step around the threshold; fast markets step by several times it, because the
+  market keeps moving while the round is proposed, agreed and transmitted.
+- **After a freeze the step is larger still.** If a leg halts past `MAX_FX_AGE` the price is held;
+  when a round finally lands, the whole accumulated currency move arrives in one block.
+- Curve's crvUSD aggregator is the one exception to the discreteness: it genuinely does move
+  continuously, with trades.
+
+The rule was written against a *donation* path — an attacker inflating a vault's share price within
+a transaction — and that path does not exist here: neither leg is manipulable by anything a borrower
+can do in a block, and the manipulable-looking one, the administered NAV, is the leg that IS
+throttled. What remains is genuine market movement arriving in steps, which is the same exposure
+every Chainlink-priced Llamalend market carries. It is bounded by the risk parameters and the borrow
+cap, not by the oracle, and it should be argued on those terms in the governance conversation rather
+than presented as compliance with a rule this oracle does not meet.
+
+### Two more failure causes
+
+**5. The foreign-exchange feed can halt or go mad.** Unlike the wsgem's `pip`, a Chainlink feed
+carries a publication time, so it can be age-bounded — and is, at `MAX_FX_AGE`. A stale, reverting,
+non-positive or absurd answer reads as `FX_DOWN`, which freezes the reported price at its last good
+value: the same response hazard 2 gives a dark `pip`, for the same reason. `fxFrozen()` distinguishes
+it from a dark `pip`, and the transition is evented once via `FxDown`/`FxRestored`.
+
+"Absurd" is bounded rather than judged: a currency quote outside 1e-18 and 1e18 in WAD is not a
+currency quote, whatever the feed says, and freezing is better than composing it into a market price.
+
+**6. The borrowed token's quote is a governance dependency.** Curve's crvUSD aggregator is not a
+proxy and cannot go stale, but its admin — the Curve DAO agent, the same one that admins the
+LendFactory — chooses the pools its average is taken over. The contract cannot police that and does
+not pretend to: a zero or unreadable answer freezes, an absurd one freezes, and anything in between
+is taken at face value.
+
+This is a real widening of this repo's "nothing to trust" story, and it is worth being blunt about.
+The same-currency shim adds nothing to the wsgem's own feed. These two add a Chainlink OCR set and,
+for crvUSD, a DAO-managed aggregator. The shims are still ownerless — no owner, no ward, no setter,
+every parameter immutable — but the *feeds* they read are not, and neither is repointable without a
+redeploy.
+
+### What is not hedged
+
+The gem is assumed to hold its peg to the currency the foreign-exchange feed prices. For wstGBP that
+is tGBP against GBP, and there is no tGBP/USD feed to check it with. A tGBP depeg moves these
+markets' collateral price by exactly the depeg, in the wrong direction, and nothing in the oracle
+notices. The same-currency instance does not carry this risk at all — there, a tGBP depeg moves
+collateral and debt together.
+
+### Reading it in operation
+
+The sibling's views, plus three that exist because there are now three legs to go dark:
+
+| View | Use |
+|---|---|
+| `spotPrice()` | The undamped **composed** price. Zero in every failure state |
+| `quotePrice()` | The wrapper's live quote in **gem** terms. Zero only when the wsgem's own feed is dark |
+| `fxRate()` | The live conversion factor, WAD. Zero only when a conversion leg is dark |
+| `quoteCeiling()` | The ceiling on the rate-limited leg — in quote terms, not price terms |
+| `fxFrozen()` | True when the freeze is the conversion rather than the `pip` |
+
+`quotePrice()` and `fxRate()` are the pair that matters: between them an operator sees which leg is
+dark without decoding a held price.
+
+### One oracle per instance, and they are indistinguishable
+
+Every wstGBP instance shares a wsgem, a gem, a pip and an upside speed. So any of their oracles
+passes every wiring check the deploy scripts share — a live, healthy, self-consistent oracle for the
+wrong market, which is the one failure nothing on-chain catches. `WSGEM_ORACLE` is a single
+environment variable serving all three.
+
+What catches it is `_assertOracleExtra`, which each instance overrides with a statement true only of
+its own oracle: the cross-currency instances check `BORROWED()`, the feed addresses and the quote
+kind; the same-currency instance checks that the undamped spot IS `burncost()`, which a converted
+price fails.
+
+Each instance carries its own suites and proves this from its own side -- `<Instance>DeployScript`
+against mocks, `fork/<Instance>` against live addresses. The rejection is asserted in both
+directions, so neither instance can be opened against the other's oracle and neither can be opened
+against the first instance's.
 
 ## Adding a new wsgem
 

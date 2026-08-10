@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test}                 from "forge-std/Test.sol";
 import {WsgemLlamalendOracle} from "../../src/WsgemLlamalendOracle.sol";
 import {IWsgem}               from "../../src/interfaces/IWsgem.sol";
+import {IWsgemShimOracle}     from "../../src/interfaces/IWsgemShimOracle.sol";
 import {IPip}                 from "../../src/interfaces/IPip.sol";
 import {WstGBPMarketScript}   from "../../script/WstGBP.s.sol";
 
@@ -15,8 +16,8 @@ interface IActFile {
 /// @notice Exposes the deploy script's internal oracle validation so the LIVE instance can be
 ///         run through the exact code path `make market-deploy` will take with `WSGEM_ORACLE` set.
 contract LiveOracleScriptHarness is WstGBPMarketScript {
-    function assertOracle(WsgemLlamalendOracle oracle_) external {
-        _assertOracle(oracle_);
+    function assertOracle(address oracle_) external {
+        _assertOracle(IWsgemShimOracle(oracle_));
     }
 }
 
@@ -79,7 +80,7 @@ contract WstGBPLiveOracleForkTest is Test {
     ///      window than at broadcast time.
     function test_theMarketDeployValidationAcceptsTheLiveOracle() public {
         LiveOracleScriptHarness h_ = new LiveOracleScriptHarness();
-        h_.assertOracle(oracle);
+        h_.assertOracle(address(oracle));
     }
 
     /// @dev The provenance guarantee the vendored monetary policy gets, extended to our own

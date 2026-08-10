@@ -5,7 +5,9 @@ first.
 
 ```
                           ┌──────────────────────────────────────┐
-  Step 1  oracle          │ WsgemLlamalendOracle                 │  make oracle-deploy
+  Step 1  oracle          │ WsgemLlamalendOracle       (tGBP)    │  make oracle-deploy
+                          │  or WsgemFxLlamalendOracle (crvUSD,  │
+                          │                             frxUSD)  │
                           └──────────────────────────────────────┘
                                         │
   Step 2  observe         ── at least one publication ──          (days, not minutes)
@@ -19,44 +21,112 @@ first.
   Step 4  governance      ── Curve DAO vote: set_borrow_cap ──     docs/06
 ```
 
+## Step 0 — Choose the instance
+
+Every target below is parameterised by `INSTANCE`, which names the file in `script/` and the two
+contracts inside it. The default is the first instance, so a bare `make oracle-dry` still means
+wstGBP/tGBP.
+
+| `INSTANCE` | Market | Sheet |
+|---|---|---|
+| _(unset)_ or `WstGBP` | wstGBP / tGBP | [instances/wstgbp.md](instances/wstgbp.md) |
+| `WstGBPCrvUSD` | wstGBP / crvUSD | [instances/wstgbp-crvusd.md](instances/wstgbp-crvusd.md) |
+| `WstGBPFrxUSD` | wstGBP / frxUSD | [instances/wstgbp-frxusd.md](instances/wstgbp-frxusd.md) |
+
+Pass it as a **command-line assignment to make** — `make market-dry INSTANCE=WstGBPCrvUSD`, not
+`INSTANCE=WstGBPCrvUSD make market-dry`. The Makefile does `-include .env` and then `export`, which
+makes every value in `.env` a make file-variable, and file-variables beat environment ones.
+
+Each instance is deployed, observed and voted on **separately**. Nothing is shared between them
+except the collateral and the wsgem's feed.
+
 ## Step 1 — Deploy the oracle
 
 ```bash
-make oracle-dry      # simulate against live state, no key, nothing sent
-make oracle-deploy   # broadcast + verify, signing from the keystore
+make oracle-dry      INSTANCE=$INSTANCE   # simulate against live state, no key, nothing sent
+make oracle-deploy   INSTANCE=$INSTANCE   # broadcast + verify, signing from the keystore
 ```
+
+Omit `INSTANCE=` only if you mean wstGBP/tGBP. It is shown on every command below because
+forgetting it is silent: the default instance is a real, deployable market, so a bare
+`make oracle-deploy` intended for wstGBP/crvUSD deploys a perfectly good wstGBP/tGBP oracle
+instead.
 
 `make oracle-dry` runs the real script against live chain state with no wallet: it deploys into the
 simulated EVM, runs every `_assertOracle` check, and prints the report block. Read every line of
-that block against [instances/wstgbp.md](instances/wstgbp.md) before broadcasting.
+that block against your instance's sheet in [instances/](instances/) before broadcasting.
 
-Expected report:
+**The one identity that holds for every instance is `price == spot`.** A fresh oracle checkpoints at
+construction, so the rate limit cannot be binding against itself yet; anything else means the wrong
+wsgem is configured. What `spot` itself should equal is what differs.
+
+Same-currency (`INSTANCE` unset or `WstGBP`) — `spot` IS the wrapper's `burncost()`:
 
 ```
 ---
 oracle ............: 0x…
   wsgem ...........: 0x57C3571f10767E49C9d7b60feb6c67804783B7aE
   gem .............: 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287
+  borrowed ........: 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287   ← the gem again
   pip .............: 0x6A79dCe61A12aa4b75449e0B03746260765D07dF
   max upside/sec ..: 28935185185
   price ...........: <the live burncost, exactly>
+  spot ............: <the same number>
 ---
 ```
 
-`price` must equal `burncost()` exactly — the redemption quote, which sits 25 bp below
-`navprice()` for this instance. A fresh oracle checkpoints at construction, so the rate limit
-cannot be binding against itself yet — anything else means the wrong wsgem is configured.
+`price` must equal `burncost()` exactly — the redemption quote, which sits 25 bp below `navprice()`
+for this instance.
 
-Record the address, then:
+Cross-currency (`WstGBPCrvUSD`, `WstGBPFrxUSD`) — `spot` is the quote **converted**, so it equals
+`burncost()` only by coincidence. The script prints the legs so the three-term identity can be
+checked by hand:
+
+```
+---
+oracle ............: 0x…
+  wsgem ...........: 0x57C3571f10767E49C9d7b60feb6c67804783B7aE
+  gem .............: 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287
+  borrowed ........: <crvUSD or frxUSD -- NOT the gem>
+  pip .............: 0x6A79dCe61A12aa4b75449e0B03746260765D07dF
+  max upside/sec ..: 28935185185
+  price ...........: <quote x fx / 1e18>
+  spot ............: <the same number>
+  quote (gem/wsgem): <the live burncost>
+  fx rate (WAD) ...: <GBP per borrowed token>
+  fx feed .........: 0x5c0Ab2d9b5a7ed9f470386e82BB36A3613cDd4b5
+  borrowed quote ..: <the Curve aggregator or the Chainlink feed>
+  max fx age ......: 108000
+  CHECK: quote x fx / 1e18 == spot, and price == spot on a fresh deploy
+---
+```
+
+Record the address, then confirm on-chain. Common to both:
 
 ```bash
 export ORACLE=<deployed address>
 cast call $ORACLE "price()(uint256)"        --rpc-url $ETH_RPC_URL
 cast call $ORACLE "spotPrice()(uint256)"    --rpc-url $ETH_RPC_URL   # must equal price()
-cast call $WSGEM  "burncost()(uint256)"     --rpc-url $ETH_RPC_URL   # must equal price()
 cast call $ORACLE "frozen()(bool)"          --rpc-url $ETH_RPC_URL   # expect: false
 cast call $ORACLE "WSGEM()(address)"        --rpc-url $ETH_RPC_URL
 cast call $ORACLE "PIP()(address)"          --rpc-url $ETH_RPC_URL   # must equal wsgem.pip()
+```
+
+Same-currency only:
+
+```bash
+cast call $WSGEM  "burncost()(uint256)"     --rpc-url $ETH_RPC_URL   # must equal price()
+```
+
+Cross-currency only — `burncost()` is one leg, not the answer:
+
+```bash
+cast call $ORACLE "BORROWED()(address)"     --rpc-url $ETH_RPC_URL   # the dollar, not the gem
+cast call $ORACLE "quotePrice()(uint256)"   --rpc-url $ETH_RPC_URL   # must equal wsgem.burncost()
+cast call $ORACLE "fxRate()(uint256)"       --rpc-url $ETH_RPC_URL   # non-zero
+cast call $ORACLE "fxFrozen()(bool)"        --rpc-url $ETH_RPC_URL   # expect: false
+# and the identity, to a wei of rounding:
+#   quotePrice() * fxRate() / 1e18 == spotPrice()
 ```
 
 ## Step 2 — Watch it across a publication
@@ -76,6 +146,18 @@ Over at least one publication, confirm:
 | `frozen()` | stays false |
 | `price()` | never zero, never above `spotPrice()` |
 
+**Cross-currency instances: watch `quotePrice()`, not `spotPrice()`, for the publication itself.**
+`spotPrice()` moves whenever the currency moves, which is most blocks, so it cannot tell you a
+publication landed and it cannot tell you one was missed. `quotePrice()` is the NAV leg alone and
+moves only when the wsgem's feed does. The table above still holds with that substitution in the
+first row:
+
+| | Expected |
+|---|---|
+| `quotePrice()` moves | at the publication, and only then |
+| `price()` converges to `spotPrice()` | fully, before the next publication |
+| `fxFrozen()` | stays false throughout |
+
 A `price()` that does *not* converge before the next publication means `MAX_UPSIDE_SPEED` is too
 tight for this wsgem's actual yield — see [04-parameters.md](04-parameters.md). Redeploy the oracle
 with a looser speed rather than proceeding; it is immutable, and it is far cheaper to replace now
@@ -88,13 +170,29 @@ and drives it through a *synthetic* publication to demonstrate the absorption sh
 It does not replace the observation — a real publication through the real feed key is the thing
 being waited for — but it turns "watch it by hand" into something re-runnable.
 
+### `WSGEM_ORACLE` serves every instance, and they are indistinguishable
+
+One variable, three markets, and every wstGBP oracle shares a wsgem, a gem, a pip and an upside
+speed — so the wrong one passes every wiring check the deploy scripts share while pricing collateral
+in a currency the market has no relationship to. Nothing on-chain catches that.
+
+What catches it is each instance's `_assertOracleExtra`, which states something true only of its own
+oracle, and `make` echoes the pairing before every run:
+
+```
+using WSGEM_ORACLE=0x… for instance WstGBPCrvUSD
+```
+
+Read that line. If it names the wrong instance, the run reverts at the preflight — but read it
+anyway.
+
 ## Step 3 — Create the market
 
 ```bash
 export WSGEM_ORACLE=$ORACLE   # reuse the oracle from step 1 rather than deploying a second
 
-make market-dry               # simulate: deploys calculator + policy, calls create, runs every assert
-make market-deploy            # broadcast + verify
+make market-dry     INSTANCE=$INSTANCE   # simulate: calculator + policy + create, every assert running
+make market-deploy  INSTANCE=$INSTANCE   # broadcast + verify
 ```
 
 `--slow` is on in both deploy targets: each transaction must confirm before the next is sent,
@@ -110,7 +208,7 @@ not optional: the oracle exists and has been observed **before** the market is c
 
 Resuming a partial market broadcast is the one path the script cannot police: `--resume` replays
 the saved transaction backlog without re-executing the script, so no Solidity check runs. Use
-`make market-resume`, which re-applies the `WSGEM_ORACLE` guard before invoking forge — and never
+`make market-resume INSTANCE=$INSTANCE`, which re-applies the `WSGEM_ORACLE` guard before invoking forge — and never
 call `forge script --resume` directly. (A backlog can only exist if the run that generated it
 passed the guard, so this closes the loop rather than patching a live hole.)
 
@@ -122,10 +220,20 @@ satisfies. The result would be a market pricing its collateral in terms of somet
 nothing on-chain would object. `test_anOracleForADifferentAssetIsRejected` demonstrates exactly that
 oracle passing the factory's checks and being refused here.
 
+Every instance adds its own check on top of that shared set, and needs to: the three wstGBP
+instances share a wsgem, a gem, a pip and an upside speed, so the list above passes for **any** of
+their oracles against **any** of their markets. `WSGEM_ORACLE` is one variable serving all three.
+The cross-currency instances discriminate on `BORROWED()` and the feed addresses; the
+same-currency one on the identity that its undamped spot IS `burncost()`, which a converted price
+fails. The rejection is asserted in both directions, per instance, against mocks and against live
+addresses.
+
 What the script does, in order — the reasoning is in
 [00-architecture.md](00-architecture.md#deployment-order-and-the-one-awkward-dependency):
 
-1. Validate a supplied `WSGEM_ORACLE`, or deploy a fresh `WsgemLlamalendOracle`
+1. Validate a supplied `WSGEM_ORACLE`, or deploy a fresh oracle — `WsgemLlamalendOracle` for the
+   same-currency instance, `WsgemFxLlamalendOracle` for a cross-currency one. Which is decided by
+   the instance's `_deployOracle`, not by anything you pass
 2. Deploy `WsgemRateCalculator`
 3. Predict the controller at `CREATE(factory, nonce + 2)`
 4. `CREATE` `HyperbolicDynamicMP` from the vendored initcode, bound to that prediction
@@ -144,14 +252,28 @@ controller ........: 0x…
 amm ...............: 0x…
 ---
 collateral ........: 0x57C3…B7aE
-borrowed ..........: 0x27f6…5287
-price .............: <the live burncost>
+borrowed ..........: <BORROWED() -- see below>
+price .............: <see below>
 measured yield/sec : 0
 mp target rate/sec : 317097920
 mp target apr .....: 10000000005120000
 ---
 WARNING: borrow_cap is 0. …
 ```
+
+`borrowed` and `price` are the two lines that differ by instance, and they are the two worth
+reading hardest — a market created against the wrong one of either is not recoverable:
+
+| Instance | `borrowed` | `price` |
+|---|---|---|
+| `WstGBP` | `0x27f6…5287` — tGBP, the gem | the live `burncost()` |
+| `WstGBPCrvUSD` | `0xf939…1b4E` — crvUSD, **not** the gem | the composed price, `burncost x GBP/USD / crvUSD` |
+| `WstGBPFrxUSD` | `0xCAcd…6E29` — frxUSD, **not** the gem | the composed price, `burncost x GBP/USD / frxUSD/USD` |
+
+On a cross-currency instance `price` will sit meaningfully **above** `burncost()` — sterling buys
+more than a dollar — and a `price` that happens to equal `burncost()` there means the wrong oracle
+was supplied, not that everything lines up. Cross-check it against the step-1 report block for the
+same oracle: the number should be unchanged apart from whatever the currency did since.
 
 `measured yield/sec: 0` and `target apr: ~1%` are **correct** at this point, not a fault: the rate
 calculator reports nothing until it has recorded two publications, so the policy sits on its
@@ -177,7 +299,7 @@ ID=$(cast call $FACTORY "vaults_index(address)(uint256)" $VAULT --rpc-url $ETH_R
 cast call $FACTORY "markets(uint256)" $ID --rpc-url $ETH_RPC_URL
 
 # Wiring
-cast call $VAULT      "asset()(address)"                  --rpc-url $ETH_RPC_URL  # the gem
+cast call $VAULT      "asset()(address)"                  --rpc-url $ETH_RPC_URL  # BORROWED()
 cast call $AMM        "price_oracle_contract()(address)"  --rpc-url $ETH_RPC_URL  # our oracle
 cast call $AMM        "admin()(address)"                  --rpc-url $ETH_RPC_URL  # the controller
 cast call $CONTROLLER "monetary_policy()(address)"        --rpc-url $ETH_RPC_URL  # $MP
@@ -186,6 +308,25 @@ cast call $MP         "RATE_CALCULATOR()(address)"        --rpc-url $ETH_RPC_URL
 
 # Borrowing is shut
 cast call $CONTROLLER "borrow_cap()(uint256)"             --rpc-url $ETH_RPC_URL  # expect: 0
+```
+
+`VAULT.asset()` is the token the market **borrows**, which is the gem only on the same-currency
+instance. On a cross-currency one it must be `BORROWED()` — crvUSD or frxUSD — and reading the gem
+back there means the wrong instance was deployed:
+
+```bash
+cast call $CONTROLLER "borrowed_token()(address)"         --rpc-url $ETH_RPC_URL  # == VAULT.asset()
+cast call $CONTROLLER "collateral_token()(address)"       --rpc-url $ETH_RPC_URL  # the wsgem
+```
+
+Cross-currency instances, additionally — the oracle the market is actually wired to must be this
+instance's, and the same-currency shim does not answer `BORROWED()` at all:
+
+```bash
+export ORACLE=$(cast call $AMM "price_oracle_contract()(address)" --rpc-url $ETH_RPC_URL)
+cast call $ORACLE "BORROWED()(address)"        --rpc-url $ETH_RPC_URL  # == VAULT.asset()
+cast call $ORACLE "BORROWED_QUOTE()(address)"  --rpc-url $ETH_RPC_URL  # the instance's dollar quote
+cast call $ORACLE "fxFrozen()(bool)"           --rpc-url $ETH_RPC_URL  # expect: false
 ```
 
 Verify the two shims on Etherscan — `--verify` does this, but confirm it landed. The monetary
@@ -198,7 +339,8 @@ runtime code is byte-identical to Curve's own live deployment.
 
 - [ ] Oracle deployed, verified, address recorded
 - [ ] Oracle observed across at least one publication, converging correctly
-- [ ] Market created, all six addresses recorded in [instances/wstgbp.md](instances/wstgbp.md)
+- [ ] Market created, all six addresses recorded in this instance's sheet under [instances/](instances/)
+- [ ] `borrowed` and `price` in the step-3 report match the table for this instance
 - [ ] Every readback in step 4 matches
 - [ ] `borrow_cap()` reads 0 — confirming the market is not yet live
 - [ ] Shims verified on Etherscan

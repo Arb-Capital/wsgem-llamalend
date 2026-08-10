@@ -175,6 +175,95 @@ Contract bounds: `INTERVALS` in [2, 7]; `MAX_PUBLICATION_GAP` in [1 day, 90 days
 cadence, or an on-time feed reads as overdue, and the floor must sit well under the cadence, or it
 defers genuine publications — `test_rateIntervalsAndGap` asserts both.
 
+## The cross-currency instances
+
+Everything above is the wstGBP/tGBP set. wstGBP/crvUSD and wstGBP/frxUSD carry a different one, and
+the reason is not subtle: the sDOLA/crvUSD donor above is a pair of assets that track each other,
+and these markets are sterling collateral against dollar debt. Thirty-five basis point bands against
+a currency pair that moves a percent on an ordinary day would leave borrowers permanently in soft
+liquidation.
+
+The donor is Curve's **svZCHF/crvUSD** market (controller `0xFd85e847…`), which is the same shape
+with the Swiss franc in place of sterling. See [reference/addresses.md](reference/addresses.md).
+
+| Parameter | wstGBP/tGBP | wstGBP/crvUSD and /frxUSD | Source |
+|---|---|---|---|
+| `A` | 285 (~35 bp) | **180** (~56 bp) | svZCHF/crvUSD |
+| `fee` | 0.2% | **0.05%** | svZCHF/crvUSD |
+| `loan_discount` | 1.3% | **5%** | svZCHF/crvUSD's 4.3% + 70 bp — see below |
+| `liquidation_discount` | 1% | **2.3%** | svZCHF/crvUSD |
+| `MAX_FX_AGE` | n/a | **30 hours** | 24 h heartbeat + grace |
+| Everything else | | unchanged | Same wsgem, same feed, same cadence |
+
+The shim and calculator values are deliberately identical across all three markets. The rate limit
+binds on the NAV leg alone, and the NAV leg is the same wsgem publishing on the same weekly cadence
+at the same ~6.8 basis points; nothing about which token is borrowed changes what a mistaken
+publication looks like or how fast it should propagate.
+
+### `loan_discount` — the 70 basis points that are ours
+
+svZCHF/crvUSD's oracle composes Curve pool moving averages, which move with every trade. Ours
+composes a Chainlink push feed, which moves only when a round fires — triggered at **0.15%** on
+GBP/USD. In a calm market the reported sterling price therefore sits routinely around that far
+behind the market, in either direction, with nothing having failed. Seventy basis points is roughly
+four times that typical lag.
+
+The threshold is a trigger and not a cap, so it is **not** a bound on how far behind the price can
+be: a move that outruns a round leaves it further behind until the next one lands, by however much
+the market travelled meanwhile. The buffer is sized against the ordinary case and deliberately not
+against the fast one.
+
+Spent on `loan_discount` rather than `liquidation_discount` on purpose: that moves where a borrower
+may **open** without moving where liquidation begins, so the buffer pays for the borrower's entry
+rather than giving a soft-liquidating position more room to keep losing.
+
+It does not cover an arbitrarily fast move. Nothing in a discount does; that is what the liquidation
+discount and the borrow cap are for.
+
+### `MAX_FX_AGE` — 30 hours
+
+Every Chainlink leg used here is on a 24-hour heartbeat, so the bound is that plus six hours of
+grace. It is sized off the heartbeat rather than off the deviation cadence deliberately: a quiet
+currency legitimately produces nothing but heartbeat rounds, and a bound tight enough to notice that
+would freeze the market every quiet weekend. (Checked: GBP/USD does publish through weekends, so no
+market-hours carve-out is needed.)
+
+Curve's crvUSD aggregator has no publication time and nothing to bound — it moves with trades. Only
+its zero and unreadable cases are guarded.
+
+### The borrow-rate anchor — a known mismatch, accepted
+
+`WsgemRateCalculator` measures the collateral's realised NAV yield — a **sterling** yield, ~3.54%
+APR — and `HyperbolicDynamicMP` takes it as the target borrow rate. Against tGBP debt that makes a
+loop roughly break-even at target utilization, which is the whole logic of the design. Against
+dollar debt it does not: dollar rates are not sterling rates, and the loop is a currency carry
+trade.
+
+It is reused anyway, unchanged, and that is a choice rather than an oversight. The alternative is
+vendoring and byte-verifying a second Curve monetary policy — a large new burden for what is a
+policy preference, and one that would break the property that all three markets run identical
+shim code with identical parameters. Note svZCHF/crvUSD does not use a yield-linked policy at all
+(its `RATE_CALCULATOR()` reverts, and its `target_apr` is 5.28%), so there is no precedent pulling
+the other way either. Worth revisiting before the DAO conversation; not worth blocking on.
+
+### The post-sDOLA rule is not met by the conversion
+
+`MAX_UPSIDE_SPEED` above is argued partly as donation resistance under Curve's blanket rule that no
+Llamalend oracle should permit an instantaneous price jump for any reason. That argument covers the
+NAV leg on these instances too — it is the same limit on the same feed — and does **not** cover the
+conversion, which is deliberately unthrottled and moves in discrete Chainlink rounds. No step is
+capped: the deviation thresholds (0.15% GBP/USD, 0.5% frxUSD/USD) trigger rounds rather than
+limiting them, so a fast market steps by several times the threshold and a freeze-and-recover
+delivers the whole accumulated move at once. The reasoning, and why throttling it would
+be worse, is in [02-oracle-shim.md](02-oracle-shim.md#where-the-rate-limit-binds--the-nav-leg-and-nowhere-else);
+raise it in the governance conversation rather than letting a reviewer find it.
+
+### What is not priced in
+
+The gem is assumed to hold its peg to sterling. There is no tGBP/USD feed, so a tGBP depeg moves
+collateral value by exactly the depeg with nothing noticing. No discount here is sized for it, and
+the same-currency instance does not carry the risk at all.
+
 ## Choosing for a new wsgem
 
 | Parameter | How to decide |

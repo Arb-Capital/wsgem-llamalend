@@ -5,6 +5,7 @@ import {Test}                 from "forge-std/Test.sol";
 import {WsgemLlamalendOracle} from "../../src/WsgemLlamalendOracle.sol";
 import {WsgemRateCalculator}  from "../../src/WsgemRateCalculator.sol";
 import {IWsgem}               from "../../src/interfaces/IWsgem.sol";
+import {IWsgemShimOracle}     from "../../src/interfaces/IWsgemShimOracle.sol";
 import {IPip}                 from "../../src/interfaces/IPip.sol";
 import {ILendFactory}         from "../../src/interfaces/ILendFactory.sol";
 import {ILendController}      from "../../src/interfaces/ILendController.sol";
@@ -20,8 +21,8 @@ import {MockPip, MockGem, MockWsgem} from "../mocks/MockWsgem.sol";
 ///      a real deploy. Inheriting the production script keeps the test honest: this is the same
 ///      code path a broadcast takes, not a reimplementation of it.
 contract MarketScriptHarness is WstGBPMarketScript {
-    function assertOracle(WsgemLlamalendOracle oracle_) external {
-        _assertOracle(oracle_);
+    function assertOracle(address oracle_) external {
+        _assertOracle(IWsgemShimOracle(oracle_));
     }
 }
 
@@ -217,7 +218,7 @@ contract WsgemLlamalendForkTest is Test {
 
     function test_aCorrectlyWiredOracleIsAccepted() public {
         MarketScriptHarness h_ = new MarketScriptHarness();
-        h_.assertOracle(oracle);
+        h_.assertOracle(address(oracle));
     }
 
     function test_anOracleForADifferentAssetIsRejected() public {
@@ -234,7 +235,7 @@ contract WsgemLlamalendForkTest is Test {
 
         MarketScriptHarness h_ = new MarketScriptHarness();
         vm.expectRevert(bytes("oracle: wsgem mismatch"));
-        h_.assertOracle(wrong_);
+        h_.assertOracle(address(wrong_));
     }
 
     function test_anOracleWithTheWrongSpeedIsRejected() public {
@@ -243,13 +244,13 @@ contract WsgemLlamalendForkTest is Test {
 
         MarketScriptHarness h_ = new MarketScriptHarness();
         vm.expectRevert(bytes("oracle: speed mismatch"));
-        h_.assertOracle(wrong_);
+        h_.assertOracle(address(wrong_));
     }
 
     function test_anAddressWithNoCodeIsRejected() public {
         MarketScriptHarness h_ = new MarketScriptHarness();
         vm.expectRevert(bytes("oracle: no code at address"));
-        h_.assertOracle(WsgemLlamalendOracle(address(0xdead)));
+        h_.assertOracle(address(0xdead));
     }
 
     function test_aFrozenOracleIsRejected() public {
@@ -261,7 +262,7 @@ contract WsgemLlamalendForkTest is Test {
 
         MarketScriptHarness h_ = new MarketScriptHarness();
         vm.expectRevert(bytes("oracle: feed is frozen -- refusing to build on a held price"));
-        h_.assertOracle(oracle);
+        h_.assertOracle(address(oracle));
     }
 
     // --- Helpers ------------------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 # wsgem → Curve Llamalend V2
 
-Deploying a Curve Llamalend V2 lending market for a **wsgem** — an ERC-20 wrapper whose value
-accrues against an underlying **gem** — with the wsgem as collateral and the gem borrowed.
+Deploying Curve Llamalend V2 lending markets for a **wsgem** — an ERC-20 wrapper whose value
+accrues against an underlying **gem** — with the wsgem as collateral, and either the gem or a
+foreign stablecoin borrowed.
 
 Llamalend will not take a wsgem as it stands. It needs a price oracle implementing
 `price()`/`price_w()`, and a monetary policy bound to the market's own Controller. A wsgem provides
@@ -11,6 +12,12 @@ neither. This repo provides both, plus the deployment machinery and the runbook.
                      ┌─────────────────────────────────────────────┐
    wsgem feed        │                 this repo                   │
    (weekly NAV) ─────┼──► WsgemLlamalendOracle ──► price() ────────┼──► AMM
+        │            │      ▲ same-currency: the gem is borrowed   │
+        │            │                                             │
+        │            │    WsgemFxLlamalendOracle ──► price() ──────┼──► AMM
+        │            │      ▲ cross-currency: a dollar is borrowed │
+   GBP/USD ──────────┼──────┘                                      │
+   <borrowed>/USD ───┼──────┘                                      │
         │            │                                             │
         └────────────┼──► WsgemRateCalculator ──► rate() ──────────┼──► HyperbolicDynamicMP
                      └─────────────────────────────────────────────┘        (Curve's, vendored)
@@ -21,41 +28,58 @@ neither. This repo provides both, plus the deployment machinery and the runbook.
 storage slot behind a single key, and interposing a second discretionary party between it and a
 lending market adds something to trust rather than subtracting risk.
 
-**Nothing in `src/` names a token.** Exactly one file does:
-[`script/WstGBP.s.sol`](script/WstGBP.s.sol). To list a future wsgem, copy it, change the
-constants, done.
+**Nothing in `src/` names a token.** Only the instance files under `script/` do. To list a future
+wsgem, copy one, change the constants, done.
 
-| Instance | Sheet | Status |
-|---|---|---|
-| wstGBP (over tGBP) | [docs/instances/wstgbp.md](docs/instances/wstgbp.md) | oracle live at [`0xdc85…557C`](https://etherscan.io/address/0xdc85a32D5B93e040A4e84401D567DcE02237557C) (2026-08-02), observing across a publication; market not yet deployed |
+| Instance | Borrowed | Oracle | Sheet | Status |
+|---|---|---|---|---|
+| wstGBP / tGBP | the gem | `WsgemLlamalendOracle` | [wstgbp.md](docs/instances/wstgbp.md) | oracle live at [`0xdc85…557C`](https://etherscan.io/address/0xdc85a32D5B93e040A4e84401D567DcE02237557C) (2026-08-02), observing across a publication; market not yet deployed |
+| wstGBP / crvUSD | crvUSD | `WsgemFxLlamalendOracle` | [wstgbp-crvusd.md](docs/instances/wstgbp-crvusd.md) | not deployed |
+| wstGBP / frxUSD | frxUSD | `WsgemFxLlamalendOracle` | [wstgbp-frxusd.md](docs/instances/wstgbp-frxusd.md) | not deployed |
+
+The first market borrows the wrapper's own gem, so `burncost()` — the WAD redemption quote — already
+IS Llamalend's collateral-in-borrowed price and the shim carries no scaling term at all. The other
+two borrow a dollar against sterling collateral, which breaks that identity and needs a conversion:
+`burncost x GBP/USD / <borrowed>/USD`. Hence a second oracle, not a second parameter.
 
 ## What's here
 
 | | |
 |---|---|
-| `src/WsgemLlamalendOracle.sol` | Ownerless `price()`/`price_w()` shim. Reports the redemption quote: rate-limits up, passes down, freezes on pause, floors a live zero quote at one wei. |
+| `src/WsgemLlamalendOracle.sol` | Ownerless `price()`/`price_w()` shim, same-currency. Reports the redemption quote: rate-limits up, passes down, freezes on pause, floors a live zero quote at one wei. |
+| `src/WsgemFxLlamalendOracle.sol` | Its cross-currency sibling. Same shim, one conversion later — and the rate limit binds on the NAV leg only, so a currency move reaches the market at full size. |
 | `src/WsgemRateCalculator.sol` | Ownerless `rate()`/`rate_w()` shim. Realised yield across the last 4 publications. |
-| `src/interfaces/` | Solidity translations of Curve's Vyper interfaces. |
+| `src/interfaces/` | Solidity translations of Curve's Vyper interfaces, plus the two feed shapes. |
 | `script/WsgemLlamalendDeploy.s.sol` | Generic deploy bases. No token knowledge. |
-| `script/WstGBP.s.sol` | The concrete deployment. The only file naming a token. |
+| `script/WstGBP.s.sol` | The wstGBP/tGBP deployment. |
+| `script/WstGBPFx.s.sol` | What the two cross-currency wstGBP instances share. |
+| `script/WstGBP{CrvUSD,FrxUSD}.s.sol` | Three values each: the borrowed token, its dollar quote, and that quote's shape. |
 | `script/bytecode/` | Curve's `HyperbolicDynamicMP`, compiled, with provenance and two verification paths. |
 | `docs/` | The runbook. Numbered, ordered, meant to be worked through. |
 | `test/WsgemRateMath.t.sol` | Arithmetic hardening: an independent reference model, boundaries, saturation, ring indices. |
+| `test/WsgemFxLlamalendOracle.t.sol` | The conversion: that the rate limit does not touch it, that each of its failure shapes freezes, and that composing cannot produce a zero. |
+| `test/WstGBP{CrvUSD,FrxUSD}DeployScript.t.sol` | One suite per instance. Its constants, its bounds, and that its deploy rejects every other instance's oracle. |
 | `test/fork/` | The real gate: live feed, real `LendFactory`, real market creation — plus what a stepping publication actually costs, measured against a symmetrically damped counterfactual. |
 
 ## Quick start
 
 ```bash
 make deps && make build
-make test          # 210 unit + invariant tests, no RPC
-make test-fork     # 45 tests against live mainnet state (needs ETH_RPC_URL)
+make test          # 320 unit + invariant tests, no RPC
+make test-fork     # 75 tests against live mainnet state (needs ETH_RPC_URL)
 
 make coverage      # first-party src coverage summary to the terminal
 make gen-report    # + HTML report into docs/coverage-report/ (gitignored; needs lcov)
 
 make oracle-dry    # simulate the oracle deploy against live state
 make market-dry    # simulate the whole market deploy, every assert running
+
+make market-dry INSTANCE=WstGBPCrvUSD   # the same, for another instance
 ```
+
+Every deploy target takes `INSTANCE`, which names the file in `script/` and the two contracts inside
+it; unset means wstGBP/tGBP, so nothing that predates it changes. Pass it as a command-line
+assignment to `make`, not as an environment variable — the Makefile's `.env` include would win.
 
 Deploy targets (`oracle-deploy`, `market-deploy`) sign from an encrypted keystore. Each has a
 `-dry` twin that runs the same script keyless: no `--broadcast --verify`, no sender or keystore
@@ -68,14 +92,15 @@ match a real deploy's.
 |---|---|
 | [00-architecture.md](docs/00-architecture.md) | What a market is made of, the deployment cycle, who holds what power |
 | [01-prerequisites.md](docs/01-prerequisites.md) | Toolchain, environment, pre-flight checks |
-| [02-oracle-shim.md](docs/02-oracle-shim.md) | The four hazards and what is done about each |
+| [02-oracle-shim.md](docs/02-oracle-shim.md) | The four hazards, what is done about each, and the two more the conversion adds |
 | [03-rate-calculator…](docs/03-rate-calculator-and-monetary-policy.md) | Why the long window, and Curve's policy |
 | [04-parameters.md](docs/04-parameters.md) | Every number, its bounds, and why |
 | [05-deploy-mainnet.md](docs/05-deploy-mainnet.md) | The runbook |
 | [06-post-deployment.md](docs/06-post-deployment.md) | The DAO vote that actually opens the market |
 | [07-operations.md](docs/07-operations.md) | Privileged surface, alarms, incident response |
 | [08-integration.md](docs/08-integration.md) | For consumers of a deployed market |
-| [reference/addresses.md](docs/reference/addresses.md) | Curve V2 infrastructure, identical per instance |
+| [reference/addresses.md](docs/reference/addresses.md) | Curve V2 infrastructure, the price feeds, and what was considered and rejected |
+| [instances/](docs/instances/) | One sheet per market: [wstgbp](docs/instances/wstgbp.md), [wstgbp-crvusd](docs/instances/wstgbp-crvusd.md), [wstgbp-frxusd](docs/instances/wstgbp-frxusd.md) |
 
 ## Two things to know up front
 
@@ -115,12 +140,15 @@ arguments and asserts the runtime code is **byte-identical** to Curve's live dep
 test does the same comparison locally against the compiled runtime, so a corrupted file fails
 without needing an RPC. [script/bytecode/PROVENANCE.md](script/bytecode/PROVENANCE.md)
 
-## Adding a new wsgem
+## Adding a new instance
 
 1. Copy `docs/instances/TEMPLATE.md` to `docs/instances/<slug>.md`.
-2. Copy `script/WstGBP.s.sol` to `script/<Symbol>.s.sol` and change the constants.
-3. Extend `test/WsgemDeployScript.t.sol` so the new constants are pinned too.
-4. Work the runbook.
+2. Copy `script/WstGBP.s.sol` to `script/<Symbol>.s.sol` and change the constants — or, for another
+   dollar market against this collateral, copy `script/WstGBPCrvUSD.s.sol`, which is three values.
+3. Add `test/<Symbol>DeployScript.t.sol` — one suite per instance — pinning the new constants and
+   checking that the new deploy rejects every existing instance's oracle, and a
+   `test/fork/<Symbol>.fork.t.sol` proving the addresses are what they claim to be.
+4. Work the runbook with `INSTANCE=<Symbol>`.
 
 If `docs/00`–`docs/08`, `src/`, or `script/WsgemLlamalendDeploy.s.sol` needs editing to accommodate
 the new token, that is a bug in the generic layer — fix it there, generically, rather than forking.

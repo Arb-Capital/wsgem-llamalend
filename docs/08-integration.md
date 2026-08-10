@@ -83,15 +83,31 @@ surface that as "not yet live" rather than as a failure.
 
 ## Pricing
 
-The market's oracle is `m.price_oracle`, and for a wsgem market it is this repo's shim.
+The market's oracle is `m.price_oracle`, and for a wsgem market it is one of this repo's two shims.
 
 ```solidity
-uint256 p = IPriceOracle(oracle).price();   // wsgem in gem, 1e18 -- the redemption quote
+uint256 p = IPriceOracle(oracle).price();   // collateral in the borrowed token, 1e18
 ```
 
-The reported price is the wrapper's `burncost()`: the NAV net of the redemption spread, which is
-what one wsgem actually redeems for. Collateral is therefore valued at the executable floor, and
-borrowing power is quoted against it.
+Which shim depends on what the market borrows. If it borrows the wsgem's own gem, the reported
+price is the wrapper's `burncost()`: the NAV net of the redemption spread, which is what one wsgem
+actually redeems for. Collateral is therefore valued at the executable floor, and borrowing power is
+quoted against it.
+
+If it borrows something else — a dollar stablecoin against sterling collateral — the reported price
+is that quote **converted**: `burncost x GBP/USD / <borrowed>/USD`. Everything below still holds,
+with three additions:
+
+- **The price moves when a currency moves,** at full size and in the same block. Only the NAV leg is
+  rate-limited. A display that assumes this price only ever ratchets up will be wrong.
+- **There are more ways to freeze.** A stale, reverting or absurd Chainlink answer, or an unreadable
+  borrowed-token quote, freezes the reported price exactly as a paused wsgem feed does.
+  `fxFrozen()` says the conversion is the cause rather than the wsgem's own feed.
+- **`spotPrice()` is the composed spot,** not the raw redemption quote. `quotePrice()` gives the
+  wsgem leg in gem terms and `fxRate()` the conversion factor, if you want the legs separately.
+
+Tell the two apart by asking the oracle for `BORROWED()`: the same-currency shim does not have it
+and the call reverts.
 
 Integrating against it, three properties matter:
 

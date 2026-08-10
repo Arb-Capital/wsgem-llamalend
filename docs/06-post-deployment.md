@@ -8,6 +8,12 @@ that.
 Only the Curve DAO can. Start the governance conversation before you deploy — it is the slowest
 step, measured in weeks.
 
+**One vote per market.** wstGBP/tGBP, wstGBP/crvUSD and wstGBP/frxUSD each ship with
+`borrow_cap == 0` and each needs its own `set_borrow_cap`. Opening one opens nothing else. The cap
+is also the parameter that bounds what a mistaken publication or a currency shock can cost, so it
+deserves a per-market number rather than a copied one — the cross-currency markets carry a risk the
+first does not (see [04-parameters.md](04-parameters.md)).
+
 ## Step 1 — Pre-vote verification
 
 Check these before proposing.
@@ -20,7 +26,7 @@ cast call $FACTORY "markets(uint256)" $ID --rpc-url $ETH_RPC_URL
 | Claim | How it is checked |
 |---|---|
 | The triplet is the factory's own | `markets(id)` returns your three addresses |
-| Oracle is sane | `price()` equals the live redemption quote (`burncost()`); `price()` == `price_w()`; `frozen()` and `quoteIsZero()` false |
+| Oracle is sane | `price()` == `price_w()`; `frozen()` and `quoteIsZero()` false. Same-currency: `price()` equals the live redemption quote (`burncost()`). Cross-currency: `price()` equals `spotPrice()`, and `fxFrozen()` is false |
 | Oracle is ownerless | Verified source; no owner, ward or setter |
 | Policy is Curve's own code | Runtime bytecode identical to Curve's live sDOLA policy — [PROVENANCE.md](../script/bytecode/PROVENANCE.md) |
 | Policy is bound to this market | `MP.CONTROLLER()` == this controller |

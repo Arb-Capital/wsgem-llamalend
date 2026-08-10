@@ -75,10 +75,35 @@ cast call $ORACLE "frozen()(bool)"       --rpc-url $ETH_RPC_URL
 | **Rate limit binding** | `price() < spotPrice()` for > 12h | A weekly step clears in ~6.5 hours, so 12h means either the yield outran `MAX_UPSIDE_SPEED` or someone published a jump. Investigate which. |
 | **Feed frozen** | `frozen() == true` for > 1h | Feed paused or its proxy broken. Collateral is being valued on a held price. |
 | **Quote is zero** | `quoteIsZero() == true` | The wrapper's redemption spread reached 100%: redemption pays nothing and the reported price is one wei. Not a pause — new borrowing is closed and the last real anchor is kept for recovery. Escalate to the wrapper's operators. |
-| **Publication missed** | Polled `spotPrice()` unchanged in > 9 days | Cadence is weekly. Nine days is late. There is no on-chain staleness guard — this alarm is the guard. |
-| **NAV fell** | `spotPrice()` below its previous value | Passes straight through to collateral value. Check liquidation queue immediately. |
+| **Publication missed** | Polled NAV-leg reading unchanged in > 9 days | Cadence is weekly. Nine days is late. There is no on-chain staleness guard — this alarm is the guard. |
+| **NAV fell** | The NAV-leg reading below its previous value | Passes straight through to collateral value. Check liquidation queue immediately. |
 
-Key the publication alarm on **polling `spotPrice()`**, not on `PriceUpdated` events: the event
+**Which view is the "NAV-leg reading" depends on the instance, and getting it wrong breaks both of
+the last two alarms.** On a same-currency oracle it is `spotPrice()`: the undamped price IS the
+wsgem's redemption quote, so it moves only when the feed does.
+
+On a cross-currency oracle it is **`quotePrice()`**. `spotPrice()` there is the quote already
+multiplied by a currency rate that moves most blocks, which breaks the alarms in both directions:
+a missed publication is masked, because sterling drifting keeps `spotPrice()` changing and the
+9-day timer never fires; and an ordinary currency move against you reads as a NAV fall, so the
+"check the liquidation queue immediately" page fires on days when nothing published at all.
+`quotePrice()` is the NAV leg alone, in gem terms, and moves only when the wsgem's feed does.
+
+```bash
+# same-currency
+cast call $ORACLE "spotPrice()(uint256)" --rpc-url $ETH_RPC_URL
+
+# cross-currency -- the NAV leg, undamped, in GEM terms
+cast call $ORACLE "quotePrice()(uint256)" --rpc-url $ETH_RPC_URL
+```
+
+Note `quotePrice()` reads zero when the wsgem's feed is paused or its quote is zero — the same two
+states `spotPrice()` collapses on a same-currency oracle — and does NOT read zero merely because a
+conversion leg is dark, which is what keeps the publication alarm alive through a Chainlink outage.
+The **Rate limit binding** alarm above is unaffected: `price() < spotPrice()` compares two composed
+numbers, and the conversion cancels.
+
+Key the publication alarm on **polling**, not on `PriceUpdated` events: the event
 only fires when traffic drives `price_w`, so an idle market — including the entire
 `borrow_cap == 0` period before the DAO vote — emits nothing however many publications land. The
 same idleness also means nothing is checkpointing the rate calculator; that is harmless (both
@@ -88,6 +113,26 @@ shims read the live feed), but it is why the event stream goes quiet, not the fe
 raw spot alongside, and `QuoteZeroed(anchor)` / `QuoteRestored(price)` mark entry into and exit
 from the one-wei zero-quote state — so on a trafficked market the full report history is
 reconstructable from logs alone.
+
+### The conversion legs are live — cross-currency instances only
+
+The same-currency market has one feed to watch. The cross-currency ones have three, and each fails
+differently.
+
+```bash
+cast call $ORACLE "fxFrozen()(bool)"    --rpc-url $ETH_RPC_URL   # a conversion leg is dark
+cast call $ORACLE "quotePrice()(uint256)" --rpc-url $ETH_RPC_URL # the wsgem leg, gem terms
+cast call $ORACLE "fxRate()(uint256)"   --rpc-url $ETH_RPC_URL   # the conversion factor, WAD
+```
+
+`frozen()` says the price is held; the pair above says which leg is responsible. `quotePrice() == 0`
+with `fxRate() > 0` is the wsgem's own feed; the reverse is Chainlink or the aggregator. Alarm on
+`fxFrozen()` separately from `frozen()`: the responses differ, and so does who you contact.
+
+A stale conversion is the likeliest of the three to fire, because it is bounded by a clock
+(`MAX_FX_AGE`, 30 hours) rather than by a publisher's intent. Chainlink's 24-hour heartbeat leaves
+six hours of margin, so a fired alarm means the feed genuinely stopped rather than merely went
+quiet.
 
 ### The borrow rate is being set by something real
 
@@ -131,11 +176,26 @@ action. The monetary policy's `parameters()` likewise reports the live rate curv
 Both shims are permissionless and both take no arguments. A daily poke of each is the whole job:
 
 ```bash
-cast send $ORACLE "price_w()" --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
-cast send $CALC   "rate_w()"  --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+export WSGEM_CONTROLLER=<this market's controller>
+make poke
 ```
 
-or `make poke`. Nothing breaks without it — both views compute from live state — but two things
+`make poke` takes the **controller**, not the two shim addresses, and reads the oracle and the
+calculator out of the market itself:
+
+```
+controller.amm().price_oracle_contract()        -> the oracle this market prices with
+controller.monetary_policy().RATE_CALCULATOR()  -> the calculator this market rates with
+```
+
+That is not ceremony. Every wstGBP instance shares a wsgem, so a keeper handed two loose addresses
+can pair one market's oracle with another's calculator, send two transactions, collect two green
+receipts, and leave both markets' checkpoints exactly where they were — the failure this target
+exists to prevent, in the shape a scheduled job would never notice. Deriving from the controller
+removes the pairing as a thing anyone can get wrong. `WSGEM_ORACLE` and `WSGEM_CALC` are still
+honoured if set, as assertions against what the market says, so a stale `.env` fails loudly.
+
+Run one keeper per market. Nothing breaks without it — both views compute from live state — but two things
 improve with it, and one of them is a bound worth stating outright.
 
 **`rate_w()`: observing publications on an idle market.** A checkpoint is only recorded when
@@ -144,20 +204,54 @@ the measurement window falls behind the feed. This is the standing version of th
 missed** alarm above, which otherwise only gets noticed after the fact.
 
 **`price_w()`: keeping the rate limit's banked allowance small.** The upside ceiling is measured
-from the last `price_w`, capped at `MAX_ELAPSED` = 7 days:
+from the last `price_w`, capped at `MAX_ELAPSED` = 7 days, and it applies to whatever that oracle
+anchors:
 
 ```
-ceiling = cachedPrice × (1 + MAX_UPSIDE_SPEED × min(elapsed, MAX_ELAPSED))
+same-currency   ceiling = cachedPrice × (1 + MAX_UPSIDE_SPEED × min(elapsed, MAX_ELAPSED))
+cross-currency  ceiling = cachedQuote × (1 + MAX_UPSIDE_SPEED × min(elapsed, MAX_ELAPSED))
 ```
 
-So allowance accrues while nothing calls the write path. At the configured 0.25%/day a full seven
-idle days bank **1.75%**, and the next `price_w` may report that much higher in a single block. That
-is the one instantaneous jump this design still permits, and it is worth sizing honestly: LLAMMA's
-band price scales with the cube of the oracle price, so 1.75% at the oracle is roughly **5.3%** in
-the AMM's internal price, against a 1% liquidation discount, a 1.3% loan discount and ~35 bp bands
-at A = 285.
+The cross-currency anchor is the NAV leg in *gem* terms, not the reported price — which is why
+`quoteCeiling()` is named for the quote and not the price. Conversion is linear in the quote, so
+releasing an anchor 1.75% higher moves the reported price 1.75% higher at an unchanged conversion:
+the banked allowance is the same size on both kinds of market. What differs is that currency
+movement never *spends* it, so the NAV leg's worst case is bounded by idle time and by nothing else.
 
-A daily poke reduces the worst case from 1.75% to **0.25%**. It costs one transaction a day.
+**The currency's own steps are a separate matter, and the poke does not touch them.** They are
+deliberately unthrottled, and — apart from Curve's crvUSD aggregator, which does move with trades —
+they are not continuous either: a Chainlink feed updates in discrete rounds, and an unthrottled
+round steps the reported price the moment it lands.
+
+**Nothing caps the size of that step.** A deviation threshold (0.15% on GBP/USD, 0.5% on
+frxUSD/USD) is what *triggers* a round, not a limit on how far the price has moved by the time one
+lands — in a calm market steps arrive around the threshold, and in a fast one a single round can be
+several times it, because the market keeps moving while the round is proposed, agreed and
+transmitted. The unbounded case is starker still: if a leg halts past `MAX_FX_AGE` the oracle holds
+its last price, and when a round finally lands the whole accumulated move arrives in one block. In
+every case the oracle imposes no ceiling; the risk parameters and the borrow cap are what bound the
+exposure.
+
+So allowance accrues while nothing calls the write path. At the configured 0.25%/day — the same on
+all three instances — a full seven idle days bank **1.75%**, and the next `price_w` may report that
+much higher in a single block. That is the one instantaneous **NAV-leg** jump this design still
+permits — the currency steps above are independent of it, can coincide with it, and are not reduced
+by poking — and it is worth sizing honestly against the parameters it lands on:
+
+| Instance | liquidation discount | loan discount | band width | 1.75% is |
+|---|---|---|---|---|
+| wstGBP / tGBP | 1% | 1.3% | ~35 bp at A = 285 | **above both discounts**, 5.0 bands |
+| wstGBP / crvUSD, / frxUSD | 2.3% | 5% | ~56 bp at A = 180 | below both discounts, 3.1 bands |
+
+The cross-currency markets absorb it more comfortably, which is worth stating because the intuition
+runs the other way: they are the riskier markets in almost every other respect, and this is the one
+place their wider parameters — chosen for currency volatility, not for this — happen to help. It
+does not make the poke optional there. Three bands is still three bands, and LLAMMA's band price
+scales with the cube of the oracle price, so the AMM's internal price moves about **5.3%** on that
+jump on every instance.
+
+A daily poke reduces the worst case from 1.75% to **0.25%** — well under one band everywhere, 0.71
+at A = 285 and 0.45 at A = 180. It costs one transaction a day, per market.
 
 The window this matters most in is the one where nothing else is driving `price_w`: the entire
 `borrow_cap == 0` period between market creation and the DAO vote — the same idleness the
@@ -169,6 +263,21 @@ under 1 bp over a day — so a keeper cannot ratchet the price up faster than a 
 `test_frequentCallsBuyAlmostNoExtraAllowance` pins that.
 
 ## Incident response
+
+### A conversion leg goes dark — cross-currency instances only
+
+The reported price freezes at its last good value and the market keeps working: repayment and
+liquidation both run against a held price. That is the designed response and it needs no
+intervention on a short outage.
+
+What it costs is tracking. Collateral is valued at a stale currency rate for as long as the outage
+lasts, in whichever direction the market has since moved. If it persists past a few hours, treat it
+as a reason to ask the DAO for a `borrow_cap` reduction rather than as a reason to do nothing —
+there is no way to repoint the feed, and no way to unfreeze it from this repo.
+
+Note the crvUSD instance and the frxUSD instance fail differently here. The frxUSD one reads two
+Chainlink feeds on the same heartbeat, so a Chainlink-wide outage freezes it outright; the crvUSD
+one keeps a live borrowed-token quote from Curve through the same event.
 
 ### The feed is paused
 

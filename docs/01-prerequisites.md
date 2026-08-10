@@ -93,8 +93,8 @@ Full address list in [reference/addresses.md](reference/addresses.md).
 ## 6. Run the suites
 
 ```bash
-make test        # 210 unit + invariant tests, no RPC
-make test-fork   # 45 fork tests against live mainnet state
+make test        # 320 unit + invariant tests, no RPC
+make test-fork   # 75 fork tests against live mainnet state
 make coverage    # first-party src coverage (excludes fork tests and the gas bench)
 ```
 

@@ -7,6 +7,8 @@ import {VmSafe}             from "forge-std/Vm.sol";
 import {WsgemLlamalendOracle} from "../src/WsgemLlamalendOracle.sol";
 import {WsgemRateCalculator}  from "../src/WsgemRateCalculator.sol";
 import {IWsgem}               from "../src/interfaces/IWsgem.sol";
+import {IWsgemShimOracle}     from "../src/interfaces/IWsgemShimOracle.sol";
+import {IDecimals}            from "../src/interfaces/IDecimals.sol";
 import {ILendFactory}         from "../src/interfaces/ILendFactory.sol";
 import {ILendController}      from "../src/interfaces/ILendController.sol";
 import {IVault}               from "../src/interfaces/IVault.sol";
@@ -43,8 +45,20 @@ abstract contract WsgemLlamalendConfig {
     /// @notice The wsgem, used as collateral.
     function WSGEM() public pure virtual returns (address);
 
-    /// @notice The gem, borrowed. Cross-checked against `wsgem.gem()` before anything is deployed.
+    /// @notice The gem the wsgem's redemption quote is denominated in. Cross-checked against
+    ///         `wsgem.gem()` before anything is deployed.
+    /// @dev NOT necessarily what the market borrows -- see `BORROWED()`.
     function GEM() public pure virtual returns (address);
+
+    /// @notice The token the market borrows, and the currency the oracle prices collateral in.
+    /// @dev Defaults to the gem, which is the same-currency case the first instance deploys: the
+    ///      borrowed token IS the wsgem's underlying, and the wrapper's WAD redemption quote is
+    ///      already Llamalend's collateral-in-borrowed price with no conversion term. A
+    ///      cross-currency instance overrides this and pairs it with an oracle that carries the
+    ///      conversion; nothing else about the deployment changes.
+    function BORROWED() public pure virtual returns (address) {
+        return GEM();
+    }
 
     // --- Oracle shim -------------------------------------------------------------------------
 
@@ -110,21 +124,28 @@ abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
         require(wsgem_.decimals() == 18, "wsgem is not 18 decimals");
         require(wsgem_.navprice() > 0, "feed is paused -- refusing to deploy against a zero NAV");
         require(wsgem_.burncost() > 0, "redemption quote is zero -- refusing to deploy");
+
+        // Both oracles in this repo report a WAD price with no token-decimals term, which only
+        // holds when the borrowed token is 18 decimals too. In the same-currency case this is the
+        // gem again and the check is free; in the cross-currency case it is the one token the
+        // wsgem knows nothing about, so nothing else would catch it.
+        require(BORROWED() != address(0), "borrowed token is the zero address");
+        require(IDecimals(BORROWED()).decimals() == 18, "borrowed token is not 18 decimals");
     }
 
     /// @notice Every property an oracle must have to be used by this market, fresh or reused.
     /// @dev Deliberately not just a wiring check. `price_w() == price()` is the factory's own
     ///      requirement, restated here so a broken oracle fails before the market is built on it
     ///      rather than half way through `create`.
-    function _assertOracle(WsgemLlamalendOracle oracle_) internal {
+    function _assertOracle(IWsgemShimOracle oracle_) internal {
         require(address(oracle_) != address(0), "oracle: zero address");
         require(address(oracle_).code.length > 0, "oracle: no code at address");
 
         // The wiring. Any of these mismatching means the oracle prices something other than this
         // market's collateral, however healthy it looks.
-        require(address(oracle_.WSGEM()) == WSGEM(), "oracle: wsgem mismatch");
+        require(oracle_.WSGEM() == WSGEM(), "oracle: wsgem mismatch");
         require(oracle_.GEM() == GEM(), "oracle: gem mismatch");
-        require(address(oracle_.PIP()) == IWsgem(WSGEM()).pip(), "oracle: pip mismatch");
+        require(oracle_.PIP() == IWsgem(WSGEM()).pip(), "oracle: pip mismatch");
         require(oracle_.MAX_UPSIDE_SPEED() == MAX_UPSIDE_SPEED(), "oracle: speed mismatch");
 
         // Liveness. A frozen oracle is reporting a held price, and a zero-quote one is reporting
@@ -136,15 +157,51 @@ abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
         require(p_ > 0, "oracle: zero price");
         require(oracle_.price_w() == p_, "oracle: price_w != price");
         require(p_ <= oracle_.spotPrice(), "oracle: reported above spot");
+
+        _assertOracleExtra(oracle_);
+    }
+
+    /// @notice What this instance requires of an oracle beyond the shared surface.
+    /// @dev The checks above cannot separate two oracles built for the same wsgem against
+    ///      different borrowed tokens: same wsgem, same gem, same pip, same speed, and both
+    ///      report a healthy non-zero price that agrees with itself. Every instance therefore
+    ///      states something here that is true of its own oracle and false of the other's --
+    ///      otherwise the wrong one passes and the market prices collateral in a currency it has
+    ///      no relationship to.
+    ///
+    ///      The default states the same-currency case: a shim that reports the redemption quote
+    ///      itself has an undamped spot that IS `burncost()`, exactly and always. That is false for
+    ///      any oracle carrying a conversion term, which is what makes it a discriminator rather
+    ///      than a tautology -- and it means a cross-currency instance that forgets to override
+    ///      fails here rather than silently deploying against the wrong oracle.
+    function _assertOracleExtra(IWsgemShimOracle oracle_) internal view virtual {
+        require(BORROWED() == GEM(), "oracle: cross-currency instance must override this check");
+        require(oracle_.spotPrice() == IWsgem(WSGEM()).burncost(), "oracle: spot != burncost");
     }
 
     /// @notice The extra check that only holds for an oracle deployed in this run.
     /// @dev A fresh oracle checkpoints the quote in its constructor, so the rate limit cannot be
     ///      binding against itself yet and the reported price must equal the live redemption
     ///      quote exactly. A reused oracle may legitimately sit below spot while it absorbs a
-    ///      publication, so this is not asserted there.
-    function _assertFreshOracle(WsgemLlamalendOracle oracle_) internal view {
+    ///      publication, so this is not asserted there. A cross-currency instance overrides this:
+    ///      its reported price is the quote CONVERTED, and equals `burncost()` only by accident.
+    function _assertFreshOracle(IWsgemShimOracle oracle_) internal view virtual {
         require(oracle_.price() == IWsgem(WSGEM()).burncost(), "oracle: price != burncost");
+    }
+
+    /// @notice Whatever else an instance's operator needs to read off the deploy before broadcasting.
+    /// @dev Empty for the same-currency case, where `price` and `spot` are the whole story and
+    ///      `spot` IS the wrapper's `burncost()`. A cross-currency instance has legs behind that
+    ///      number, and an operator checking a three-term identity by hand needs the terms printed.
+    function _reportOracleExtra(IWsgemShimOracle oracle_) internal view virtual {}
+
+    /// @notice Deploy this instance's oracle. Called inside the broadcast.
+    /// @dev The one place a concrete deployment says which of this repo's oracles it wants. The
+    ///      default is the same-currency shim, which is what `BORROWED() == GEM()` implies.
+    function _deployOracle() internal virtual returns (IWsgemShimOracle) {
+        return IWsgemShimOracle(
+            address(new WsgemLlamalendOracle(IWsgem(WSGEM()), MAX_UPSIDE_SPEED()))
+        );
     }
 }
 
@@ -154,11 +211,11 @@ abstract contract WsgemLlamalendScript is Script, WsgemLlamalendConfig {
 ///      first and watch its reported price against the live feed across at least one publication
 ///      before a market depends on it -- see docs/05-deploy-mainnet.md.
 abstract contract WsgemOracleScript is WsgemLlamalendScript {
-    function run() external returns (WsgemLlamalendOracle oracle_) {
+    function run() external returns (IWsgemShimOracle oracle_) {
         _preflight();
 
         vm.startBroadcast();
-        oracle_ = new WsgemLlamalendOracle(IWsgem(WSGEM()), MAX_UPSIDE_SPEED());
+        oracle_ = _deployOracle();
         vm.stopBroadcast();
 
         _assertOracle(oracle_);
@@ -166,17 +223,22 @@ abstract contract WsgemOracleScript is WsgemLlamalendScript {
         _reportOracle(oracle_);
     }
 
-    function _reportOracle(WsgemLlamalendOracle oracle_) internal view {
+    function _reportOracle(IWsgemShimOracle oracle_) internal view {
         console.log("---");
         console.log("oracle ............:", address(oracle_));
-        console.log("  wsgem ...........:", address(oracle_.WSGEM()));
+        console.log("  wsgem ...........:", oracle_.WSGEM());
         console.log("  gem .............:", oracle_.GEM());
-        console.log("  pip .............:", address(oracle_.PIP()));
+        console.log("  borrowed ........:", BORROWED());
+        console.log("  pip .............:", oracle_.PIP());
         console.log("  max upside/sec ..:", oracle_.MAX_UPSIDE_SPEED());
         console.log("  price ...........:", oracle_.price());
+        console.log("  spot ............:", oracle_.spotPrice());
+        _reportOracleExtra(oracle_);
         console.log("---");
-        console.log("NEXT: record this address, then watch price() against the live burncost()");
-        console.log("      across at least one publication before deploying the market against it.");
+        console.log("NEXT: record this address, then watch price() against spotPrice() across at");
+        console.log("      least one publication before deploying the market against it. On a");
+        console.log("      FRESH oracle the two are equal; see docs/05 step 2 and the instance");
+        console.log("      sheet in docs/instances/ for what each leg should read.");
     }
 }
 
@@ -194,12 +256,12 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
     uint256 internal constant MP_MIN_TARGET_RATE = 317_097_920;
 
     struct Deployment {
-        WsgemLlamalendOracle oracle;
-        WsgemRateCalculator  rateCalculator;
-        address              monetaryPolicy;
-        address              vault;
-        address              controller;
-        address              amm;
+        IWsgemShimOracle    oracle;
+        WsgemRateCalculator rateCalculator;
+        address             monetaryPolicy;
+        address             vault;
+        address             controller;
+        address             amm;
     }
 
     function run() external returns (Deployment memory d_) {
@@ -238,13 +300,11 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         // whose collateral is priced in terms of something it has no relationship to. This is the
         // only place that can be caught, and it is cheaper to catch it before the first transaction
         // than after five.
-        if (existing_ != address(0)) _assertOracle(WsgemLlamalendOracle(existing_));
+        if (existing_ != address(0)) _assertOracle(IWsgemShimOracle(existing_));
 
         vm.startBroadcast();
 
-        d_.oracle = existing_ == address(0)
-            ? new WsgemLlamalendOracle(IWsgem(WSGEM()), MAX_UPSIDE_SPEED())
-            : WsgemLlamalendOracle(existing_);
+        d_.oracle = existing_ == address(0) ? _deployOracle() : IWsgemShimOracle(existing_);
 
         d_.rateCalculator = new WsgemRateCalculator(
             IWsgem(WSGEM()), RATE_INTERVALS(), MAX_PUBLICATION_GAP(), MIN_CHECKPOINT_SPACING()
@@ -260,7 +320,7 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         d_.monetaryPolicy  = _deployMonetaryPolicy(predicted_, address(d_.rateCalculator));
 
         address[3] memory market_ = ILendFactory(FACTORY()).create(
-            GEM(), // borrowed
+            BORROWED(), // borrowed
             WSGEM(), // collateral
             A(),
             FEE(),
@@ -316,7 +376,7 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
     }
 
     /// @dev Extends the shared token checks with the market parameters the chain will enforce.
-    function _preflight() internal view override {
+    function _preflight() internal view virtual override {
         super._preflight();
 
         ILendFactory factory_ = ILendFactory(FACTORY());
@@ -342,12 +402,12 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         require(m_.controller == d_.controller, "registry: controller mismatch");
         require(m_.amm == d_.amm, "registry: amm mismatch");
         require(m_.collateral_token == WSGEM(), "registry: collateral mismatch");
-        require(m_.borrowed_token == GEM(), "registry: borrowed mismatch");
+        require(m_.borrowed_token == BORROWED(), "registry: borrowed mismatch");
         require(m_.price_oracle == address(d_.oracle), "registry: oracle mismatch");
         require(m_.monetary_policy == d_.monetaryPolicy, "registry: monetary policy mismatch");
 
         // The wiring the factory does not report.
-        require(IVault(d_.vault).asset() == GEM(), "vault: asset mismatch");
+        require(IVault(d_.vault).asset() == BORROWED(), "vault: asset mismatch");
         require(IVault(d_.vault).controller() == d_.controller, "vault: controller mismatch");
         require(IVault(d_.vault).maxSupply() == SUPPLY_LIMIT(), "vault: supply limit mismatch");
         require(IAMM(d_.amm).price_oracle_contract() == address(d_.oracle), "amm: oracle mismatch");
@@ -360,7 +420,7 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         require(c_.vault() == d_.vault, "controller: vault mismatch");
         require(c_.monetary_policy() == d_.monetaryPolicy, "controller: monetary policy mismatch");
         require(c_.collateral_token() == WSGEM(), "controller: collateral mismatch");
-        require(c_.borrowed_token() == GEM(), "controller: borrowed mismatch");
+        require(c_.borrowed_token() == BORROWED(), "controller: borrowed mismatch");
         require(c_.loan_discount() == LOAN_DISCOUNT(), "controller: loan discount mismatch");
         require(
             c_.liquidation_discount() == LIQUIDATION_DISCOUNT(),
@@ -418,7 +478,7 @@ abstract contract WsgemMarketScript is WsgemLlamalendScript {
         console.log("amm ...............:", d_.amm);
         console.log("---");
         console.log("collateral ........:", WSGEM());
-        console.log("borrowed ..........:", GEM());
+        console.log("borrowed ..........:", BORROWED());
         console.log("price .............:", d_.oracle.price());
         console.log("measured yield/sec :", d_.rateCalculator.rate());
         console.log("mp target rate/sec :", mp_.target_rate());

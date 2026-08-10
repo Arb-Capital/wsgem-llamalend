@@ -40,7 +40,9 @@ A wsgem satisfies neither of the first two, which is why this repo exists.
 
 ## The shims
 
-Both are ownerless: no owner, no ward, no setter, no upgrade path, every parameter `immutable`. The
+Three contracts, two of which are alternatives: a market takes ONE oracle plus the calculator.
+
+All are ownerless: no owner, no ward, no setter, no upgrade path, every parameter `immutable`. The
 only mutable state in either is a checkpoint. This is the design constraint, not an accident — a
 wsgem's NAV is already a single storage slot behind a single key, and interposing a second
 discretionary party between it and a lending market would add a second thing to trust rather than
@@ -53,6 +55,20 @@ quote (`burncost()`), the executable floor. Four behaviours, each answering a sp
 upward moves are rate-limited, downward moves pass through immediately, a paused or unreadable
 feed freezes the last report rather than propagating a zero, and a live feed quoting zero is
 floored at one wei without being anchored. See [02-oracle-shim.md](02-oracle-shim.md).
+
+### `WsgemFxLlamalendOracle`
+
+The same shim for a market that borrows something other than the wsgem's gem — sterling collateral
+against dollar debt. The WAD identity between "the redemption quote" and "collateral priced in the
+borrowed token" only holds when the borrowed token IS the gem; otherwise a conversion term is
+needed, and this contract carries it: `burncost x GEM_QUOTE / BORROWED_QUOTE`.
+
+Two things about it are not obvious. The rate limit binds on the **NAV leg only**, so a currency
+move reaches the market at full size in the same block — throttling a traded, two-sided rate would
+guard nothing and would soft-liquidate healthy borrowers through every rally. And it reads external
+price feeds, which the same-currency shim does not: a Chainlink OCR set, and for crvUSD a
+DAO-managed Curve aggregator. The contract is still ownerless; the feeds it depends on are not. See
+[02-oracle-shim.md](02-oracle-shim.md#the-cross-currency-shim).
 
 ### `WsgemRateCalculator`
 

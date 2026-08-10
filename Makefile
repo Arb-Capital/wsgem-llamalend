@@ -108,7 +108,41 @@ define require_oracle
 	test -n "$${WSGEM_ORACLE}" || { \
 	echo "WSGEM_ORACLE is required: the market is deployed against an oracle that already exists"; \
 	echo "and has been observed across a publication (docs/05 step 2). Deploy and observe the"; \
-	echo "oracle first, then export WSGEM_ORACLE=<address>."; exit 1; }
+	echo "oracle first, then export WSGEM_ORACLE=<address>."; exit 1; }; \
+	echo "using WSGEM_ORACLE=$${WSGEM_ORACLE} for instance $(INSTANCE)"
+endef
+
+# --- Which instance --------------------------------------------------------------------------
+#
+# Every deploy target below is parameterised by INSTANCE, which names the file in script/ and the
+# two contracts inside it. The default is the first instance, so every invocation that predates
+# this variable behaves exactly as it did.
+#
+#   make market-dry                          # wstGBP / tGBP
+#   make market-dry INSTANCE=WstGBPCrvUSD    # wstGBP / crvUSD
+#   make market-dry INSTANCE=WstGBPFrxUSD    # wstGBP / frxUSD
+#
+# Pass it as a COMMAND-LINE assignment to make, exactly as above -- not as an environment
+# variable. This Makefile does `-include .env` and then `export`, which makes every value in .env a
+# make file-variable, and file-variables beat environment ones. `INSTANCE=x make target` would work
+# only by accident; `make target INSTANCE=x` always does.
+#
+# WSGEM_ORACLE is NOT per-instance, and that is a sharp edge: every wstGBP instance shares a wsgem,
+# a gem, a pip and an upside speed, so an oracle from the wrong instance passes every wiring check
+# the deploy script shares. What catches it is `_assertOracleExtra`, which each instance overrides
+# with something true only of its own oracle. `require_oracle` echoes the pairing above so the
+# mistake is visible before the run rather than after it.
+INSTANCE ?= WstGBP
+
+INSTANCE_SCRIPT = script/$(INSTANCE).s.sol
+ORACLE_TARGET   = $(INSTANCE_SCRIPT):$(INSTANCE)OracleScript
+MARKET_TARGET   = $(INSTANCE_SCRIPT):$(INSTANCE)MarketScript
+
+define require_instance
+	test -f "$(INSTANCE_SCRIPT)" || { \
+	echo "no such instance: $(INSTANCE) (expected $(INSTANCE_SCRIPT))"; \
+	echo "available:"; ls script/*.s.sol | grep -v WsgemLlamalendDeploy | grep -v WstGBPFx.s.sol; \
+	exit 1; }
 endef
 
 # --- Oracle ------------------------------------------------------------------------------------
@@ -125,13 +159,15 @@ endef
 # full rebuild. The dry runs pay it too, so a dry run rehearses exactly what the deploy will do.
 oracle-dry  :
 	@$(call require_rpc)
-	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPOracleScript \
+	@$(call require_instance)
+	@make clean && make build && $(KEYLESS) forge script $(ORACLE_TARGET) \
 		--rpc-url ${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
 
 oracle-deploy :
 	@$(call require_deploy_env)
+	@$(call require_instance)
 	make clean && make build
-	@forge script script/WstGBP.s.sol:WstGBPOracleScript \
+	@forge script $(ORACLE_TARGET) \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv 2> >($(REDACT) >&2)
 
@@ -147,15 +183,17 @@ oracle-deploy :
 
 market-dry  :
 	@$(call require_rpc)
+	@$(call require_instance)
 	@$(call remind_oracle_reuse)
-	@make clean && make build && $(KEYLESS) forge script script/WstGBP.s.sol:WstGBPMarketScript \
+	@make clean && make build && $(KEYLESS) forge script $(MARKET_TARGET) \
 		--rpc-url ${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
 
 market-deploy :
 	@$(call require_deploy_env)
+	@$(call require_instance)
 	@$(call require_oracle)
 	make clean && make build
-	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
+	@forge script $(MARKET_TARGET) \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv 2> >($(REDACT) >&2)
 
@@ -166,8 +204,9 @@ market-deploy :
 # change what gets resumed.
 market-resume :
 	@$(call require_deploy_env)
+	@$(call require_instance)
 	@$(call require_oracle)
-	@forge script script/WstGBP.s.sol:WstGBPMarketScript \
+	@forge script $(MARKET_TARGET) \
 		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast --resume -vvvv 2> >($(REDACT) >&2)
 
@@ -178,20 +217,43 @@ market-resume :
 # with no traffic of its own, and it keeps the oracle's banked upside allowance at one day's worth
 # (0.25%) instead of letting it reach MAX_ELAPSED's seven (1.75%). See docs/07-operations.md.
 #
-# WSGEM_ORACLE and WSGEM_CALC select what to poke. Run it from market creation, not from the DAO
-# vote: the borrow_cap == 0 window is exactly when nothing else is driving price_w.
+# WSGEM_CONTROLLER selects the MARKET to poke, and the two shims are derived from it. Run it from
+# market creation, not from the DAO vote: the borrow_cap == 0 window is exactly when nothing else
+# is driving price_w.
+#
+# WHY THE CONTROLLER AND NOT THE TWO SHIM ADDRESSES. Every wstGBP instance shares a wsgem, so a
+# preflight that only checked "both shims agree on which wsgem" would pass an oracle from one
+# market paired with a calculator from another: two green receipts, and the checkpoints the keeper
+# exists to advance left untouched on both markets. The controller is the only address that knows
+# which oracle and which calculator are actually wired into one market, so both are READ OUT of it
+# rather than supplied -- there is nothing left to mispaste.
+#
+#   controller.amm().price_oracle_contract()          -> the oracle this market prices with
+#   controller.monetary_policy().RATE_CALCULATOR()    -> the calculator this market rates with
+#
+# WSGEM_ORACLE and WSGEM_CALC remain honoured as ASSERTIONS: if either is set it must match what
+# the market says, so a stale value left in `.env` fails loudly instead of being ignored.
+#
 # PREFLIGHT, and why it is not optional here. A call to an address with no code SUCCEEDS on the
 # EVM -- it is indistinguishable from a function that returned nothing. So a keeper pointed at the
 # wrong chain, or at an address that is right on mainnet and empty on a fork, sends two
 # transactions, gets two green receipts, and updates neither checkpoint. A scheduled job would
 # report success forever while the banked allowance this target exists to bound kept growing.
 # The deploy targets get this from the script's own asserts; a bare `cast send` has none, so the
-# checks are here: mainnet, both addresses carry code, and both shims agree on which wsgem they
-# are for -- which is what catches a stale address from a previous instance.
+# checks are here: mainnet, the controller carries code, and both shims are the ones it names.
+#
+# The two sends are then status-checked INDIVIDUALLY, and the recipe fails if either did. A plain
+# `a; b` would report the recipe's status as b's alone -- so a failed `price_w()` followed by a
+# successful `rate_w()` would exit 0, which is the same false-green this preflight exists to
+# prevent, arriving one step later. Both are still ATTEMPTED on a failure, because they are
+# independent: a publication worth recording is worth recording even if the oracle poke did not
+# land. What is not acceptable is a scheduled job that says it worked when half of it did not.
 poke :
 	@$(call require_send_env)
-	@test -n "$${WSGEM_ORACLE}" || { echo "WSGEM_ORACLE is required"; exit 1; }
-	@test -n "$${WSGEM_CALC}"   || { echo "WSGEM_CALC is required";   exit 1; }
+	@test -n "$${WSGEM_CONTROLLER}" || { \
+	echo "WSGEM_CONTROLLER is required: the keeper pokes a MARKET, and the controller is the only"; \
+	echo "address that knows which oracle and calculator belong to it. Take it from the instance"; \
+	echo "sheet in docs/instances/, or from the market deploy's report block."; exit 1; }
 	@# Each result is captured, its exit status checked, and its emptiness checked BEFORE any
 	@# comparison. Inlining these as `test "$$(cast ...)" != "0x"` looks equivalent and is not: a
 	@# cast that fails writes its diagnostic to stderr and nothing to stdout, so the comparison
@@ -207,24 +269,45 @@ poke :
 		|| { echo "preflight: cast chain failed -- RPC unreachable?"; exit 1; }; \
 	test "$$chain_" = "ethlive" \
 		|| { echo "ETH_RPC_URL must point at Ethereum mainnet (got: $$chain_)"; exit 1; }; \
-	for pair_ in "WSGEM_ORACLE:$${WSGEM_ORACLE}" "WSGEM_CALC:$${WSGEM_CALC}"; do \
+	code_=$$($(KEYLESS) cast code $${WSGEM_CONTROLLER} --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: cast code failed for WSGEM_CONTROLLER"; exit 1; }; \
+	case "$$code_" in ""|"0x") echo "WSGEM_CONTROLLER has no code at $${WSGEM_CONTROLLER}"; exit 1;; esac; \
+	amm_=$$($(KEYLESS) cast call $${WSGEM_CONTROLLER} 'amm()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: amm() reverted -- is WSGEM_CONTROLLER a Llamalend controller?"; exit 1; }; \
+	mp_=$$($(KEYLESS) cast call $${WSGEM_CONTROLLER} 'monetary_policy()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: monetary_policy() reverted on the controller"; exit 1; }; \
+	test -n "$$amm_" && test -n "$$mp_" \
+		|| { echo "preflight: the controller returned nothing -- wrong contract?"; exit 1; }; \
+	oracle_=$$($(KEYLESS) cast call $$amm_ 'price_oracle_contract()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: price_oracle_contract() reverted on the AMM"; exit 1; }; \
+	calc_=$$($(KEYLESS) cast call $$mp_ 'RATE_CALCULATOR()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+		|| { echo "preflight: RATE_CALCULATOR() reverted -- is this market on HyperbolicDynamicMP?"; exit 1; }; \
+	test -n "$$oracle_" && test -n "$$calc_" \
+		|| { echo "preflight: the market named nothing -- wrong contract?"; exit 1; }; \
+	for pair_ in "oracle:$$oracle_" "calculator:$$calc_"; do \
 		name_=$${pair_%%:*}; addr_=$${pair_#*:}; \
-		code_=$$($(KEYLESS) cast code $$addr_ --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
-			|| { echo "preflight: cast code failed for $$name_"; exit 1; }; \
-		case "$$code_" in ""|"0x") echo "$$name_ has no code at $$addr_"; exit 1;; esac; \
+		c_=$$($(KEYLESS) cast code $$addr_ --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
+			|| { echo "preflight: cast code failed for the $$name_"; exit 1; }; \
+		case "$$c_" in ""|"0x") echo "the market's $$name_ has no code at $$addr_"; exit 1;; esac; \
 	done; \
-	owsgem_=$$($(KEYLESS) cast call $${WSGEM_ORACLE} 'WSGEM()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
-		|| { echo "preflight: WSGEM() reverted on the oracle"; exit 1; }; \
-	cwsgem_=$$($(KEYLESS) cast call $${WSGEM_CALC} 'WSGEM()(address)' --rpc-url $${ETH_RPC_URL} 2> >($(REDACT) >&2)) \
-		|| { echo "preflight: WSGEM() reverted on the calculator"; exit 1; }; \
-	test -n "$$owsgem_" && test -n "$$cwsgem_" \
-		|| { echo "preflight: WSGEM() returned nothing -- wrong contract?"; exit 1; }; \
-	test "$$owsgem_" = "$$cwsgem_" \
-		|| { echo "wired to different wsgems: $$owsgem_ vs $$cwsgem_"; exit 1; }
-	@cast send $(WSGEM_ORACLE) "price_w()" \
-		--rpc-url $(ETH_RPC_URL) --from $(ETH_FROM) --keystore $(ETH_KEYSTORE) $(GAS_FLAGS) 2> >($(REDACT) >&2)
-	@cast send $(WSGEM_CALC) "rate_w()" \
-		--rpc-url $(ETH_RPC_URL) --from $(ETH_FROM) --keystore $(ETH_KEYSTORE) $(GAS_FLAGS) 2> >($(REDACT) >&2)
+	if test -n "$${WSGEM_ORACLE}"; then \
+		test "$$($(KEYLESS) cast to-check-sum-address $${WSGEM_ORACLE})" = "$$oracle_" \
+			|| { echo "WSGEM_ORACLE=$${WSGEM_ORACLE} is not this market's oracle ($$oracle_)"; exit 1; }; \
+	fi; \
+	if test -n "$${WSGEM_CALC}"; then \
+		test "$$($(KEYLESS) cast to-check-sum-address $${WSGEM_CALC})" = "$$calc_" \
+			|| { echo "WSGEM_CALC=$${WSGEM_CALC} is not this market's calculator ($$calc_)"; exit 1; }; \
+	fi; \
+	echo "poking market $${WSGEM_CONTROLLER}: oracle $$oracle_, calculator $$calc_"; \
+	rc_=0; \
+	cast send $$oracle_ "price_w()" \
+		--rpc-url $${ETH_RPC_URL} --from $${ETH_FROM} --keystore $${ETH_KEYSTORE} $(GAS_FLAGS) 2> >($(REDACT) >&2) \
+		|| { echo "poke: price_w() FAILED on $$oracle_ -- the upside allowance was NOT reset"; rc_=1; }; \
+	cast send $$calc_ "rate_w()" \
+		--rpc-url $${ETH_RPC_URL} --from $${ETH_FROM} --keystore $${ETH_KEYSTORE} $(GAS_FLAGS) 2> >($(REDACT) >&2) \
+		|| { echo "poke: rate_w() FAILED on $$calc_ -- a publication may go unobserved"; rc_=1; }; \
+	test $$rc_ -eq 0 \
+		|| { echo "poke: at least one call failed; see above. This run did NOT do its job."; exit 1; }
 
 .PHONY: all deps build clean sizes fmt test test-fork coverage gen-report serve-report \
 	oracle-dry oracle-deploy market-dry market-deploy market-resume poke
