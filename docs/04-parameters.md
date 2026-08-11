@@ -264,13 +264,19 @@ The gem is assumed to hold its peg to sterling. There is no tGBP/USD feed, so a 
 collateral value by exactly the depeg with nothing noticing. No discount here is sized for it, and
 the same-currency instance does not carry the risk at all.
 
+The assumption has on-chain precedent: the Steakhouse-curated WETH/tGBP Morpho Blue market
+(`0xa4942ce9…d309d0c`) prices tGBP with the **same** Chainlink GBP/USD feed used here
+(`0x5c0A…d4b5` — see `script/WstGBPFx.s.sol`), sterling standing proxy for the token with the
+depeg equally unpriced. Precedent does not shrink the exposure; it says the assumption is already
+load-bearing in a live lending market, with real money accepting the same terms.
+
 ## Choosing for a new wsgem
 
 | Parameter | How to decide |
 |---|---|
 | `A`, `fee` | Does the pair gap, or drift? Drifting pairs take a high `A`. |
 | `loan_discount`, `liquidation_discount` | The spread on the guaranteed exit, plus margin. |
-| `MAX_UPSIDE_SPEED` | One publication of yield absorbed in hours; a month of allowance far below 10%. |
+| `MAX_UPSIDE_SPEED` | One publication of yield absorbed in hours. Then two ceilings: the full `MAX_ELAPSED` bank — 7 idle days of allowance, 1.75% at the speed configured here — can be consumed in one block if spot is above the anchor, so size it against the discounts of the tightest market it serves; and a month of chasing a mistaken publication far below an order of magnitude. |
 | `RATE_INTERVALS` | ≥ 2; more only buys jitter rejection, and costs lag after a rate change. |
 | `MAX_PUBLICATION_GAP` | Comfortably above the publication cadence. |
 | `MIN_CHECKPOINT_SPACING` | Well under the cadence and the grace. The window it implies under continuous accrual — `RATE_INTERVALS ×` this — should still be a measurement, not an instant. |

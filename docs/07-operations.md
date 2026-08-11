@@ -28,6 +28,15 @@ Default-admin-only:
 | `set_custom_admin` | Sets the market's custom-admin slot: that address becomes authorized for the per-market setters above, alongside the DAO | **Critical** — introduces a fourth principal for that market |
 | `set_owner` | Replaces the Configurator's default admin, across all markets | **Critical** |
 
+`set_custom_admin` was considered for these markets — a delegate able to zero a borrow cap without
+a full DAO vote would shorten the [halt path](#halting-the-market) — and **not** used, recorded so
+the question is not reopened without the reason: no comparable Curve market has one. Verified
+on-chain 2026-08-11 at block 25732712: `admins()` is zero for sDOLA/crvUSD (`0xC77d…40c0`),
+svZCHF/crvUSD (`0xFd85…F043`) and sfrxUSD/crvUSD (`0x3cD4…1bbe`), and `default_admin()` is the DAO
+agent (`0x4090…9968`). A fourth principal is a fourth key to steward, the table's own risk column
+calls the slot critical, and the ecosystem evidence says the DAO-only halt path is what comparable
+markets actually live with.
+
 ### Curve DAO, as `factory.admin()`
 
 A second admin slot, separate from the Configurator's `default_admin` — on mainnet both are the
@@ -65,14 +74,16 @@ deploying a new one and a DAO vote to repoint the market.
 ### The oracle is tracking the feed
 
 ```bash
-cast call $ORACLE "price()(uint256)"     --rpc-url $ETH_RPC_URL
-cast call $ORACLE "spotPrice()(uint256)" --rpc-url $ETH_RPC_URL
-cast call $ORACLE "frozen()(bool)"       --rpc-url $ETH_RPC_URL
+cast call $ORACLE "price()(uint256)"           --rpc-url $ETH_RPC_URL
+cast call $ORACLE "spotPrice()(uint256)"       --rpc-url $ETH_RPC_URL
+cast call $ORACLE "frozen()(bool)"             --rpc-url $ETH_RPC_URL
+cast call $ORACLE "cachedTimestamp()(uint40)"  --rpc-url $ETH_RPC_URL
 ```
 
 | Alarm | Condition | Means |
 |---|---|---|
 | **Rate limit binding** | `price() < spotPrice()` for > 12h | A weekly step clears in ~6.5 hours, so 12h means either the yield outran `MAX_UPSIDE_SPEED` or someone published a jump. Investigate which. |
+| **Allowance banking** | `cachedTimestamp()` more than 2 days old | Nothing is driving `price_w`, so ceiling allowance is banking toward the 7-day maximum of 1.75% — which the next write can consume in one block if spot is above the anchor by that much. At 0.25%/day, two idle days are 0.5%; **page before four** (1.0%, the entire same-currency liquidation discount). Per-market: the FX instances' wider discounts tolerate the full bank, the same-currency market's do not. The keeper below is the fix. |
 | **Feed frozen** | `frozen() == true` for > 1h | Feed paused or its proxy broken. Collateral is being valued on a held price. |
 | **Quote is zero** | `quoteIsZero() == true` | The wrapper's redemption spread reached 100%: redemption pays nothing and the reported price is one wei. Not a pause — new borrowing is closed and the last real anchor is kept for recovery. Escalate to the wrapper's operators. |
 | **Publication missed** | Polled NAV-leg reading unchanged in > 9 days | Cadence is weekly. Nine days is late. There is no on-chain staleness guard — this alarm is the guard. |
@@ -195,7 +206,10 @@ exists to prevent, in the shape a scheduled job would never notice. Deriving fro
 removes the pairing as a thing anyone can get wrong. `WSGEM_ORACLE` and `WSGEM_CALC` are still
 honoured if set, as assertions against what the market says, so a stale `.env` fails loudly.
 
-Run one keeper per market. Nothing breaks without it — both views compute from live state — but two things
+Run one keeper per market. Nothing reverts without it — both views compute from live state — but
+"nothing breaks" is only true of the contracts. The table below sizes the banked allowance against
+each market's risk buffers, and for the same-currency market the full bank exceeds both of its
+discounts: there the daily poke is a **launch requirement**, not an optimisation. Two things
 improve with it, and one of them is a bound worth stating outright.
 
 **`rate_w()`: observing publications on an idle market.** A checkpoint is only recorded when
@@ -286,9 +300,17 @@ last measurement through the grace period and then decays it. Borrowing, repayme
 all continue. Closing the market is not required: a zero borrow cap stops new borrowing, but
 repayment and liquidation are the operations to keep open, and freezing already preserves both.
 
-Watch for the pause outlasting a publication interval. Beyond that, collateral is being valued on a
-number nobody is standing behind, and the question becomes whether the DAO should lower the borrow
-cap to zero to stop new exposure accumulating.
+Be explicit about what "borrowing continues" includes: **`borrow_more` stays live at the held
+price** for as long as the freeze lasts — the oracle freezes the price, not the market, and
+`test_aMidLifeFreezeKeepsTheMarketServiceable` (`test/fork/WsgemMarketLifecycle.fork.t.sol`) pins a
+mid-freeze borrow succeeding against the deployed stack. So a freeze alarm is not just a watch
+item: it should immediately open the borrow-cap-to-zero conversation with the DAO, because the vote
+takes days and new exposure accumulates at a price nobody is standing behind for all of them. Keep
+a cap-to-zero vote pre-drafted, so the conversation starts at "execute?" rather than at "draft
+one".
+
+Watch for the pause outlasting a publication interval. Beyond that, the question is no longer
+whether to propose the cap cut but whether it should already have executed.
 
 ### The feed publishes a jump
 

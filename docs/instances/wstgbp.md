@@ -86,6 +86,13 @@ wiring and the step-2 observation conditions at the pinned block, proves the dep
 is byte-identical to this tree's build, and drills a synthetic publication, a feed pause and a
 100% spread against the deployed contract.
 
+**Before step 3 — the ~2026-08-14 publication.** The next publication is expected around
+2026-08-14 (weekly cadence from the 2026-08-07 observation). Keep the checkpoint warm — poke
+`price_w` within a few hours before the window, or banked allowance masks the absorption shape
+again, as it did on 2026-08-07 — and record the observed shape here for this cycle. That closes
+the step-2 gap the table above concedes: one publication observed, the hours-long absorption not
+yet seen live.
+
 ### Market — step 3
 
 | Contract | Address |

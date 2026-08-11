@@ -33,6 +33,23 @@ cast call $FACTORY "markets(uint256)" $ID --rpc-url $ETH_RPC_URL
 | Rate calculator is ownerless | Verified source |
 | Parameters are defensible | [04-parameters.md](04-parameters.md) |
 | Fee receiver | `factory.fee_receiver(controller)` |
+| The seed transient has left the window | `calc.checkpointCount() >= 6`, and `rate()` / `apr()` sane against the feed's ~3.54% APR — see below |
+
+The seed row is time-gated where the others are static, and it is the enforcement of an ordering
+[03](03-rate-calculator-and-monetary-policy.md) concedes nothing on-chain enforces: the
+calculator's constructor seed is a mid-cycle observation — its NAV belongs to the previous
+publication, its timestamp is the deploy block — so until it leaves the measurement window the
+reported rate reads high by up to `INTERVALS/(INTERVALS−1)`, 4/3 here.
+`test_theDeploySeedOverstatesEarlyAndCorrectsWhenItLeavesTheWindow` pins both the shape and the
+exit: the **fifth** post-deploy publication pushes the seed out, so the gate is
+`checkpointCount() >= 6` — generically `INTERVALS() + 2`: the seed, plus `INTERVALS` publications
+to fill the window, plus one to evict the seed. (Reusing the formula at a different `INTERVALS`:
+the count saturates at `SLOTS` = 8, so at the constructor maximum `INTERVALS = 7` the threshold is
+unreachable and the count cannot witness the eviction — gate on `oldestCheckpoint()`'s timestamp
+being later than the deploy block instead.) `intervalsMeasured() == 4` is **not** the gate; it
+fills one publication earlier, while the seed is still the measured endpoint. Check the gate when
+proposing and re-check before the vote executes: the cap must not go nonzero on a rate the seed is
+still inflating.
 
 ## Step 2 — The vote
 
@@ -58,20 +75,36 @@ cast call $CONFIGURATOR "admins(address)(address)" $CONTROLLER --rpc-url $ETH_RP
 
 **Ask for a small initial cap.** A cap can be raised by a later vote and lowered at any time; the
 first one should be sized to what you are willing to lose while the market's real behaviour is
-observed, not to the ambition for it. Curve's own reference markets launched capped.
+observed, not to the ambition for it. Curve's own reference markets launched capped. The cap is
+also the standing mitigation for the two exposures the oracle deliberately leaves open — borrowing
+stays live at the held price through a feed freeze, and up to seven idle days of banked ceiling
+allowance (1.75%) can be consumed in one block if spot is above the anchor
+([07-operations.md](07-operations.md)) — so a small first number is risk policy, not only launch
+prudence. Raising it to a material number is the point at which wrapper solvency and — on the
+cross-currency instances — the tGBP peg stop being observations and must be explicitly accepted
+or mitigated; precedent documents those assumptions, it does not reduce them.
 
 ### What the proposal should say
 
 The proposal should carry the reasoning as well as the addresses:
 
-- The pair, and that it is like-kind — the collateral is a wrapper over the borrowed token.
+- The pair. wstGBP/tGBP is like-kind — the collateral wraps the borrowed token. The crvUSD and
+  frxUSD instances are **not**: sterling collateral against dollar debt, with the carry and
+  tGBP-depeg exposures of [04-parameters.md](04-parameters.md). Claim only what the instance
+  being proposed supports.
 - **The NAV is published weekly by a permissioned key and can be paused to zero.** This is the
   market's central risk. The mitigation is that the oracle bounds it — the reported price is the
-  redemption quote (`burncost`, the executable floor), up-moves rate-limited to 0.25%/day at a
-  measured cost of ~0.11 bp, down-moves immediate, a pause freezes rather than zeroes. See
-  [02-oracle-shim.md](02-oracle-shim.md).
-- **Redemption is atomic, against the full supply, and slippage-free**, so liquidator depth is not a
-  risk variable — an exit always exists at a known price.
+  redemption quote (`burncost` — executable subject to the redemption gates below), up-moves
+  rate-limited to 0.25%/day at a measured cost of ~0.11 bp, down-moves immediate, a pause freezes
+  rather than zeroes. See
+  [02-oracle-shim.md](02-oracle-shim.md). Say the downside plainly: a downward publication passes
+  through in one block and can put loans into liquidation immediately and irreversibly —
+  deliberate, because a genuine collapse must reach the market.
+- **Redemption is atomic and slippage-free at the quote while its gates pass** — a compliance
+  check, an open burn window, a zero settlement cooldown, all open as configured — and the payout
+  is bounded by the wrapper's gem reserves, which covered the full supply at the verification
+  block. Present those as the assumptions they are, not as guarantees: liquidator depth stops
+  being a risk variable only while they hold, and wrapper solvency is what the exit rests on.
 - Why the parameters, especially that `liquidation_discount` clears the redemption spread.
 - That the monetary policy is Curve's own contract, with the bytecode argument.
 - That both shims are ownerless, and that the DAO retains `set_price_oracle` if either misbehaves.

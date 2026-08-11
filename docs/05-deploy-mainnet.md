@@ -165,6 +165,13 @@ first row:
 | `price()` converges to `spotPrice()` | fully, before the next publication |
 | `fxFrozen()` | stays false throughout |
 
+**The absorption shape only happens if the checkpoint is warm.** The ceiling is measured from the
+last `price_w`, and seven idle days bank the full 1.75% — which dwarfs a ~6.8 bp step, so a
+publication landing on a cold checkpoint passes through in the first recorded call and the
+hours-long absorption never occurs on-chain. That is exactly how the first live publication
+recorded (2026-08-07 — [instances/wstgbp.md](instances/wstgbp.md)). To observe the middle rows of
+the table live, poke `price_w` within a few hours before the expected publication.
+
 A `price()` that does *not* converge before the next publication means `MAX_UPSIDE_SPEED` is too
 tight for this wsgem's actual yield — see [04-parameters.md](04-parameters.md). Redeploy the oracle
 with a looser speed rather than proceeding; it is immutable, and it is far cheaper to replace now
@@ -201,6 +208,12 @@ export WSGEM_ORACLE=$ORACLE   # reuse the oracle from step 1 rather than deployi
 make market-dry     INSTANCE=$INSTANCE   # simulate: calculator + policy + create, every assert running
 make market-deploy  INSTANCE=$INSTANCE   # broadcast + verify
 ```
+
+Rerun `make market-dry` — with the real `WSGEM_ORACLE` set — at a fresh block **immediately before
+broadcasting**. The dry run executes the whole assert set against current chain state, and a
+rehearsal from hours ago says nothing about the block you are about to broadcast into. An
+oracle-less dry run remains a legitimate early rehearsal of the from-scratch pipeline; this one is
+the preflight.
 
 `--slow` is on in both deploy targets: each transaction must confirm before the next is sent,
 because the controller-address prediction depends on the factory's nonce, and the policy has to
@@ -299,6 +312,11 @@ unaffected, and re-running `make market-deploy` deploys a fresh calculator and p
 the cost of the race is the gas of the dead pair — of which the policy is genuinely dead,
 immutably bound to a controller that will never exist, and the calculator merely orphaned. Do
 not try to salvage either into the re-run.
+
+Submit the broadcast through a private RPC (e.g. Flashbots Protect). The pending `create` — and
+the controller prediction it commits to — then never sits in the public mempool, which removes
+the deliberate version of the race and leaves only the accidental one, in a window that is now
+simulation-to-inclusion rather than simulation-to-public-visibility.
 
 ## Step 4 — Verify on-chain
 
