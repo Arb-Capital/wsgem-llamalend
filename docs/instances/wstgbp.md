@@ -78,7 +78,7 @@ different collateral and different liquidity.
 | `WsgemLlamalendOracle` | `0xdc85a32D5B93e040A4e84401D567DcE02237557C` |
 | Deployed at block | 25670242 (2026-08-02), tx `0x8d9da787a890c46fe52024bc424c5f6893f945dedfe8b64ebdc9a2dde9b238dc`, 745,660 gas |
 | Price at deployment | `1004861575533190669` (≈ 1.00486 gem/wsgem) — equalled the live `burncost()` exactly, per the fresh-oracle assert; post-broadcast readback confirmed `price() == spotPrice() == burncost()`, `frozen() == false`, wsgem/pip wiring correct |
-| Observed across a publication | _(05 step 2 — in progress since 2026-08-02; do not skip)_ |
+| Observed across a publication | Yes — one publication landed between deployment and 2026-08-07, recorded by `price_w` at block 25703442: `PriceUpdated` to `1005529808480920241`, +6.65 bp on the deployment price, with `price == spot` in the same call — the banked ceiling allowance since deployment dwarfed the step, so the recorded pass-through was immediate, and the hours-long absorption shape of 05 step 2 was not observable live this cycle (it rests on the synthetic drill in `WstGBPLiveOracle.fork.t.sol`; the immediacy is the `docs/07` keeper rationale in benign form). Re-verified 2026-08-10 at block 25727712: `price() == spotPrice() == 1005529808480920241`, `frozen() == false`, `quoteIsZero() == false`, `priceCeiling()` above spot |
 
 The live instance is under fork-test coverage:
 [`test/fork/WstGBPLiveOracle.fork.t.sol`](../../test/fork/WstGBPLiveOracle.fork.t.sol) asserts its

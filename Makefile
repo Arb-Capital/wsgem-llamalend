@@ -19,6 +19,11 @@ test        :; forge test --no-match-path "test/fork/*" -vv
 # Fork tests. Hard-fails without a mainnet RPC rather than silently passing.
 test-fork   :; ./scripts/forge_test_fork.sh
 
+# Deeper invariant soak on the `intense` profile (512 runs x 256 depth against the default
+# 64 x 128). Pre-release confidence runs. Only the invariant suite: the profile changes nothing
+# for the unit and fuzz tests, so re-running them here would add minutes and no information.
+test-intense :; FOUNDRY_PROFILE=intense forge test --match-path "test/invariant/*" -vv
+
 # Coverage. Fork tests stay excluded for the same reason as `test`. The report is filtered to
 # src/ -- the suite and the deploy scripts are not the audited surface. The gas bench is excluded
 # from the RUN, not just the report: coverage builds are instrumented with the optimizer off, so
@@ -112,6 +117,20 @@ define require_oracle
 	echo "using WSGEM_ORACLE=$${WSGEM_ORACLE} for instance $(INSTANCE)"
 endef
 
+# The inverse guard, for the ORACLE broadcast. WSGEM_ORACLE being set says an oracle already
+# exists (step 1 done, step 2 underway or complete) -- and this target would broadcast a SECOND
+# one, most likely because a .env prepared for the market steps was left in place. The scripts
+# cannot catch this: WsgemOracleScript never reads the variable, and a duplicate oracle is a
+# perfectly valid deployment. Broadcasting a deliberate replacement is done by blanking the
+# variable on the command line, which is the one assignment that beats .env. The dry run stays
+# exempt on purpose: simulating the oracle pipeline while one is live is useful and sends nothing.
+define refuse_duplicate_oracle
+	test -z "$${WSGEM_ORACLE}" || { \
+	echo "WSGEM_ORACLE is set ($${WSGEM_ORACLE}): an oracle already exists, and this target would"; \
+	echo "broadcast a SECOND one. If a replacement oracle is genuinely intended, blank the"; \
+	echo "variable for this invocation:  make oracle-deploy WSGEM_ORACLE= INSTANCE=..."; exit 1; }
+endef
+
 # --- Which instance --------------------------------------------------------------------------
 #
 # Every deploy target below is parameterised by INSTANCE, which names the file in script/ and the
@@ -150,8 +169,13 @@ endef
 # The oracle shim is deployable on its own, ahead of the market, so its reported price can be
 # watched against the live wsgem across at least one NAV poke before anything depends on it.
 
-# The forge lines are @-silenced: make would otherwise echo the expanded recipe, and the recipe
-# contains ETH_RPC_URL -- which for most providers embeds an API key -- into any log of the run.
+# The forge lines are @-silenced so make does not echo them into run logs, and ETH_RPC_URL is
+# written $${ETH_RPC_URL} -- expanded by the shell at run time, not by make into the recipe text.
+# Both defences matter separately: for most providers the URL embeds an API key, @ keeps it out
+# of an ordinary run's log, and the shell-side expansion keeps it out of `make -n`, which prints
+# recipes @-silenced or not. The other make-expanded identifiers (sender address, keystore path,
+# gas numbers) are not secrets. `export` at the top of this file is what puts .env's values in
+# the shell's environment for $${} to find.
 #
 # Every dry run and deploy below starts from `make clean`: forge script broadcasts whatever
 # artifact sits in out/, and a stale one -- built from other source or other compiler settings --
@@ -161,14 +185,15 @@ oracle-dry  :
 	@$(call require_rpc)
 	@$(call require_instance)
 	@make clean && make build && $(KEYLESS) forge script $(ORACLE_TARGET) \
-		--rpc-url ${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
+		--rpc-url $${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
 
 oracle-deploy :
+	@$(call refuse_duplicate_oracle)
 	@$(call require_deploy_env)
 	@$(call require_instance)
 	make clean && make build
 	@forge script $(ORACLE_TARGET) \
-		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
+		--rpc-url $${ETH_RPC_URL} --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv 2> >($(REDACT) >&2)
 
 # --- Market ------------------------------------------------------------------------------------
@@ -186,7 +211,7 @@ market-dry  :
 	@$(call require_instance)
 	@$(call remind_oracle_reuse)
 	@make clean && make build && $(KEYLESS) forge script $(MARKET_TARGET) \
-		--rpc-url ${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
+		--rpc-url $${ETH_RPC_URL} -vvvv 2> >($(REDACT) >&2)
 
 market-deploy :
 	@$(call require_deploy_env)
@@ -194,7 +219,7 @@ market-deploy :
 	@$(call require_oracle)
 	make clean && make build
 	@forge script $(MARKET_TARGET) \
-		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
+		--rpc-url $${ETH_RPC_URL} --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast -vvvv 2> >($(REDACT) >&2)
 
 # Resuming a partial market broadcast MUST go through this target, never a direct
@@ -207,7 +232,7 @@ market-resume :
 	@$(call require_instance)
 	@$(call require_oracle)
 	@forge script $(MARKET_TARGET) \
-		--rpc-url $(ETH_RPC_URL) --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
+		--rpc-url $${ETH_RPC_URL} --sender $(ETH_FROM) --keystore $(ETH_KEYSTORE) \
 		$(GAS_FLAGS) --verify --slow --broadcast --resume -vvvv 2> >($(REDACT) >&2)
 
 # --- Keeper ------------------------------------------------------------------------------------
@@ -309,5 +334,5 @@ poke :
 	test $$rc_ -eq 0 \
 		|| { echo "poke: at least one call failed; see above. This run did NOT do its job."; exit 1; }
 
-.PHONY: all deps build clean sizes fmt test test-fork coverage gen-report serve-report \
+.PHONY: all deps build clean sizes fmt test test-fork test-intense coverage gen-report serve-report \
 	oracle-dry oracle-deploy market-dry market-deploy market-resume poke

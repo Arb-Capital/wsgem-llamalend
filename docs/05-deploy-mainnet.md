@@ -52,6 +52,13 @@ forgetting it is silent: the default instance is a real, deployable market, so a
 `make oracle-deploy` intended for wstGBP/crvUSD deploys a perfectly good wstGBP/tGBP oracle
 instead.
 
+`make oracle-deploy` refuses to run while `WSGEM_ORACLE` is set. That variable says an oracle
+already exists, so a broadcast here would deploy a second one — most likely a `.env` prepared for
+the market steps being replayed into step 1, which nothing in the script can catch (the oracle
+script never reads the variable, and a duplicate oracle is a perfectly valid deployment). A
+deliberate replacement is broadcast by blanking the variable on the command line —
+`make oracle-deploy WSGEM_ORACLE= INSTANCE=…` — the one assignment that beats `.env`.
+
 `make oracle-dry` runs the real script against live chain state with no wallet: it deploys into the
 simulated EVM, runs every `_assertOracle` check, and prints the report block. Read every line of
 that block against your instance's sheet in [instances/](instances/) before broadcasting.
@@ -279,9 +286,19 @@ same oracle: the number should be unchanged apart from whatever the currency did
 calculator reports nothing until it has recorded two publications, so the policy sits on its
 floor. See [03](03-rate-calculator-and-monetary-policy.md#the-minimum).
 
-If the run reverts with `controller address mispredicted`, someone else created a market between
-your simulation and your broadcast, moving the factory's nonce. Nothing is lost — the oracle and
-calculator from the reverted run are still deployed and reusable. Re-run.
+A nonce race — someone else creating a market on the factory while you deploy, so its nonce moves
+and the controller lands somewhere other than predicted — surfaces in two different shapes
+depending on when it happens. Caught during the simulation, it is the friendly one: the script
+reverts with `controller address mispredicted` and nothing has been broadcast. But that assert
+runs in the pre-broadcast simulation only. A race landing **between** simulation and broadcast
+surfaces on-chain instead: `create` ends with the new controller calling the policy's
+`rate_write()`, which the policy accepts only from the controller address baked into it at
+deploy — now the wrong one — so the `create` transaction reverts `Controller only`, after the
+calculator and the policy have already landed. The oracle (reused via `WSGEM_ORACLE`) is
+unaffected, and re-running `make market-deploy` deploys a fresh calculator and policy anyway, so
+the cost of the race is the gas of the dead pair — of which the policy is genuinely dead,
+immutably bound to a controller that will never exist, and the calculator merely orphaned. Do
+not try to salvage either into the re-run.
 
 ## Step 4 — Verify on-chain
 

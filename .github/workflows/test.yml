@@ -66,8 +66,25 @@ jobs:
           path: ~/.foundry/cache/rpc
           key: rpc-${{ env.ETH_FORK_BLOCK }}
 
-      # Fork tests hard-fail without a mainnet RPC rather than silently passing, so this step is
-      # skipped where the secret is unavailable (forks) instead of being made to pass hollowly.
+      # Fork tests hard-fail without a mainnet RPC rather than silently passing. Some run
+      # identities legitimately cannot see the secret: a PR from a fork, a push inside a forked
+      # repository, and Dependabot (its runs receive only Dependabot secrets, and its PRs come
+      # from the same repository, so neither fork flag is true for them). Those skip with a
+      # visible notice. The upstream repository missing the secret is a misconfiguration -- and
+      # a green check with the whole fork suite silently skipped is exactly the hollow pass this
+      # job exists to avoid -- so that fails loudly instead.
+      - name: Require the RPC secret outside forks
+        if: env.ETH_RPC_URL == ''
+        run: |
+          if [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ] || \
+             [ "${{ github.event.repository.fork }}" = "true" ] || \
+             [ "${{ github.actor }}" = "dependabot[bot]" ]; then
+            echo "::notice title=Fork tests skipped::ETH_RPC_URL is unavailable to this workflow identity; the mainnet fork suite did not run."
+          else
+            echo "::error title=Fork tests cannot run::the ETH_RPC_URL secret is not configured for this repository."
+            exit 1
+          fi
+
       - name: Run fork tests
         if: env.ETH_RPC_URL != ''
         run: ./scripts/forge_test_fork.sh
