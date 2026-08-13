@@ -168,6 +168,7 @@ contract WstGBPCrvUSDForkTest is Test {
         assertEq(o_.price(), anchor_, "and is not expressed instantly");
 
         skip(12 hours);
+        _refreshFx();
         assertEq(o_.price(), o_.spotPrice(), "half a day clears a weekly step at 0.25%/day");
     }
 
@@ -309,5 +310,20 @@ contract WstGBPCrvUSDForkTest is Test {
     function _setNav(uint256 nav_) internal {
         vm.mockCall(IWsgem(WSGEM).pip(), abi.encodeCall(IPip.read, ()), abi.encode(nav_));
         require(IWsgem(WSGEM).navprice() == nav_, "nav override did not take");
+    }
+
+    /// @dev Re-stamp the live GBP/USD round at the current block, answer unchanged. For tests
+    ///      that advance time but are not ABOUT staleness: the pinned round arrives carrying
+    ///      whatever age it happened to have at the pin, so without this a synthetic skip can
+    ///      push it over `MAX_FX_AGE` and turn a NAV-throttle test into a freeze test the moment
+    ///      the pin moves.
+    function _refreshFx() internal {
+        IChainlinkAggregator f_ = IChainlinkAggregator(cfg.FX_FEED());
+        (uint80 id_, int256 answer_,,, uint80 in_) = f_.latestRoundData();
+        vm.mockCall(
+            address(f_),
+            abi.encodeCall(IChainlinkAggregator.latestRoundData, ()),
+            abi.encode(id_, answer_, block.timestamp, block.timestamp, in_)
+        );
     }
 }

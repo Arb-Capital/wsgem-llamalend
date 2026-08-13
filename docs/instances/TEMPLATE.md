@@ -10,7 +10,7 @@
 | | Value | Runbook variable |
 |---|---|---|
 | wsgem (collateral) | `0x…` | `$WSGEM` |
-| gem (borrowed) | `0x…` | `$GEM` |
+| gem (borrowed) | `0x…` | `$GEM`, and `$BORROWED` when the instance borrows the gem |
 | Feed (`pip`) | `0x…` | |
 | wsgem decimals | 18 | |
 | gem decimals | 18 | |

@@ -58,9 +58,12 @@ The vote must call the Configurator, from the factory's admin.
 ```
 Configurator: 0x6065858d0eF0AA240DFdf6f1A0B2ae34B41f49bC
 
-  set_borrow_cap(controller, <cap in gem units, 18 decimals>)
+  set_borrow_cap(controller, <cap in borrowed-token units, 18 decimals>)
   set_admin_percentage(controller, <WAD share of interest to the DAO>)
 ```
+
+The cap is denominated in what the market lends out — the **borrowed token**, not the collateral
+and not necessarily the gem: tGBP for wstGBP/tGBP, crvUSD for wstGBP/crvUSD.
 
 `set_admin_percentage` is optional but conventional — Curve used `1e17` (10%) for its own reference
 markets. `set_borrow_cap` is the one that matters: until it lands, the market is inert.
@@ -118,11 +121,19 @@ cast call $CONTROLLER "admin_percentage()(uint256)"  --rpc-url $ETH_RPC_URL
 
 ## Step 4 — Seed the vault
 
-Borrowing needs lent liquidity. The vault is plain ERC-4626 over the gem:
+Borrowing needs lent liquidity. The vault is plain ERC-4626 over the **borrowed token** — what
+lenders supply and borrowers receive: the gem (tGBP) on the same-currency instance, crvUSD on
+wstGBP/crvUSD. It is never the collateral, and on a cross-currency instance it is not the gem
+either — approving the gem there deposits nothing. So take the answer from the vault itself — it
+is the contract that will pull the token — and check it against the instance sheet's
+**borrowed** row before approving:
 
 ```bash
-cast send $GEM   "approve(address,uint256)" $VAULT <amount> --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
-cast send $VAULT "deposit(uint256,address)"  <amount> $ETH_FROM --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+export BORROWED=$(cast call $VAULT "asset()(address)" --rpc-url $ETH_RPC_URL)
+echo $BORROWED   # must match the instance sheet -- if not, $VAULT is the wrong market's vault
+
+cast send $BORROWED "approve(address,uint256)" $VAULT <amount> --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
+cast send $VAULT    "deposit(uint256,address)"  <amount> $ETH_FROM --rpc-url $ETH_RPC_URL --keystore $ETH_KEYSTORE
 ```
 
 The vault carries 1000 virtual shares as inflation-attack defence, so a fresh vault does **not**
@@ -162,4 +173,5 @@ Optional, and separable:
 - [ ] A loan opened, health checked, and **repaid**
 - [ ] `borrow_apr()` / `lend_apr()` sane
 - [ ] Monitoring live
-- [ ] Addresses published in [instances/wstgbp.md](instances/wstgbp.md)
+- [ ] Addresses published in the instance sheet — [instances/wstgbp.md](instances/wstgbp.md) or
+      [instances/wstgbp-crvusd.md](instances/wstgbp-crvusd.md)

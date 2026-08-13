@@ -11,7 +11,7 @@ token.
 | | Value | Runbook variable |
 |---|---|---|
 | wsgem (collateral) | `0x57C3571f10767E49C9d7b60feb6c67804783B7aE` | `$WSGEM` |
-| gem (borrowed) | `0x27f6c8289550fCE67f6B50BeD1F519966aFE5287` | `$GEM` |
+| gem (borrowed) | `0x27f6c8289550fCE67f6B50BeD1F519966aFE5287` | `$GEM`, and `$BORROWED` — this instance borrows the gem |
 | Feed (`pip`) | `0x6A79dCe61A12aa4b75449e0B03746260765D07dF` | |
 | wsgem decimals | 18 | |
 | gem decimals | 18 | |
