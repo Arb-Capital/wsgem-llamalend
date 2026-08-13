@@ -109,10 +109,10 @@ contract WstGBPCrvUSDOracleScript is WsgemOracleScript, WstGBPCrvUSDScript {
 /// @dev `make market-dry INSTANCE=WstGBPCrvUSD`, then `make market-deploy INSTANCE=WstGBPCrvUSD`.
 ///
 ///      Set WSGEM_ORACLE to reuse the oracle from WstGBPCrvUSDOracleScript rather than deploying a
-///      second one. It must be THIS instance's oracle: the wstGBP/tGBP and wstGBP/frxUSD oracles
-///      are both rejected by `_assertOracleExtra`, which is the only place that confusion can be
-///      caught. The resulting market has a zero borrow cap until a Curve DAO vote lifts it, and
-///      that vote is separate from every other instance's.
+///      second one. It must be THIS instance's oracle: the wstGBP/tGBP oracle is rejected by
+///      `_assertOracleExtra`, which is the only place that confusion can be caught. The resulting
+///      market has a zero borrow cap until a Curve DAO vote lifts it, and that vote is separate
+///      from every other instance's.
 contract WstGBPCrvUSDMarketScript is WsgemMarketScript, WstGBPCrvUSDScript {
     // The same disambiguations as the oracle script, plus `_preflight`, which the market branch
     // extends with the factory and AMM bounds. Forwarding to that branch is what keeps them.

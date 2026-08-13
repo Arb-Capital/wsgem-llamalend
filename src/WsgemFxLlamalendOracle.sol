@@ -139,13 +139,13 @@ contract WsgemFxLlamalendOracle is IPriceOracle {
         QUOTE
     }
 
-    /// @dev What shape the borrowed token's quote source has. Two exist because the two borrowed
-    ///      tokens this repo lists against have different best sources, not because generality was
-    ///      wanted for its own sake: crvUSD has Curve's own aggregator, which is what Curve's crvUSD
-    ///      markets read and what carries no heartbeat to go stale; frxUSD has no such contract and
-    ///      does have a dedicated Chainlink feed. Routing the second through a Curve pool to force
-    ///      one shape would rest the market on a single fourteen-minute pool average instead of an
-    ///      OCR set, which is worse, so both shapes are supported and each instance names its own.
+    /// @dev What shape the borrowed token's quote source has. Two exist because borrowed tokens
+    ///      have different best sources, not because generality was wanted for its own sake: crvUSD
+    ///      has Curve's own aggregator, which is what Curve's crvUSD markets read and what carries no
+    ///      heartbeat to go stale; a token with no such contract but a dedicated Chainlink feed takes
+    ///      that instead. Routing such a token through a Curve pool to force one shape would rest the
+    ///      market on a single short pool average instead of an OCR set, which is worse, so both
+    ///      shapes are supported and each instance names its own.
     enum QuoteKind {
         CURVE_AGGREGATOR,
         CHAINLINK_FEED

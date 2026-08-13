@@ -310,7 +310,7 @@ In ordinary operation the limit should not bind, so that gap is the alarm to wir
 Everything above is `src/WsgemLlamalendOracle.sol`, which prices a wsgem in **its own gem**. That is
 the case where `burncost()` already IS Llamalend's collateral-in-borrowed price, and the shim
 carries no scaling term at all. `src/WsgemFxLlamalendOracle.sol` is its sibling, for markets where
-the borrowed token is a different currency — wstGBP against crvUSD or frxUSD — and the identity
+the borrowed token is a different currency — wstGBP against crvUSD — and the identity
 breaks. The missing term is a foreign-exchange rate:
 
 ```
@@ -345,8 +345,8 @@ any reason* — is satisfied by the same-currency shim and is **not** satisfied 
 conversion is unthrottled by design, and a Chainlink feed does not move continuously: it updates in
 discrete rounds, so an unthrottled round steps the reported price the moment it lands. Sized:
 
-- **Nothing caps a step, in any regime.** The deviation threshold (0.15% on GBP/USD, 0.5% on
-  frxUSD/USD) *triggers* a round; it does not bound how far the price has moved by the time one
+- **Nothing caps a step, in any regime.** The deviation threshold (0.15% on GBP/USD) *triggers* a
+  round; it does not bound how far the price has moved by the time one
   lands. Calm markets step around the threshold; fast markets step by several times it, because the
   market keeps moving while the round is proposed, agreed and transmitted.
 - **After a freeze the step is larger still.** If a leg halts past `MAX_FX_AGE` the price is held;
@@ -413,7 +413,7 @@ dark without decoding a held price.
 Every wstGBP instance shares a wsgem, a gem, a pip and an upside speed. So any of their oracles
 passes every wiring check the deploy scripts share — a live, healthy, self-consistent oracle for the
 wrong market, which is the one failure nothing on-chain catches. `WSGEM_ORACLE` is a single
-environment variable serving all three.
+environment variable serving them all.
 
 What catches it is `_assertOracleExtra`, which each instance overrides with a statement true only of
 its own oracle: the cross-currency instances check `BORROWED()`, the feed addresses and the quote

@@ -237,8 +237,8 @@ deliberately unthrottled, and — apart from Curve's crvUSD aggregator, which do
 they are not continuous either: a Chainlink feed updates in discrete rounds, and an unthrottled
 round steps the reported price the moment it lands.
 
-**Nothing caps the size of that step.** A deviation threshold (0.15% on GBP/USD, 0.5% on
-frxUSD/USD) is what *triggers* a round, not a limit on how far the price has moved by the time one
+**Nothing caps the size of that step.** A deviation threshold (0.15% on GBP/USD) is what
+*triggers* a round, not a limit on how far the price has moved by the time one
 lands — in a calm market steps arrive around the threshold, and in a fast one a single round can be
 several times it, because the market keeps moving while the round is proposed, agreed and
 transmitted. The unbounded case is starker still: if a leg halts past `MAX_FX_AGE` the oracle holds
@@ -247,7 +247,7 @@ every case the oracle imposes no ceiling; the risk parameters and the borrow cap
 exposure.
 
 So allowance accrues while nothing calls the write path. At the configured 0.25%/day — the same on
-all three instances — a full seven idle days bank **1.75%**, and the next `price_w` may report that
+all instances — a full seven idle days bank **1.75%**, and the next `price_w` may report that
 much higher in a single block. That is the one instantaneous **NAV-leg** jump this design still
 permits — the currency steps above are independent of it, can coincide with it, and are not reduced
 by poking — and it is worth sizing honestly against the parameters it lands on:
@@ -255,11 +255,11 @@ by poking — and it is worth sizing honestly against the parameters it lands on
 | Instance | liquidation discount | loan discount | band width | 1.75% is |
 |---|---|---|---|---|
 | wstGBP / tGBP | 1% | 1.3% | ~35 bp at A = 285 | **above both discounts**, 5.0 bands |
-| wstGBP / crvUSD, / frxUSD | 2.3% | 5% | ~56 bp at A = 180 | below both discounts, 3.1 bands |
+| wstGBP / crvUSD | 2.8% | 5% | ~56 bp at A = 180 | below both discounts, 3.1 bands |
 
-The cross-currency markets absorb it more comfortably, which is worth stating because the intuition
-runs the other way: they are the riskier markets in almost every other respect, and this is the one
-place their wider parameters — chosen for currency volatility, not for this — happen to help. It
+The cross-currency market absorbs it more comfortably, which is worth stating because the intuition
+runs the other way: it is the riskier market in almost every other respect, and this is the one
+place its wider parameters — chosen for currency volatility, not for this — happen to help. It
 does not make the poke optional there. Three bands is still three bands, and LLAMMA's band price
 scales with the cube of the oracle price, so the AMM's internal price moves about **5.3%** on that
 jump on every instance.
@@ -289,9 +289,9 @@ lasts, in whichever direction the market has since moved. If it persists past a 
 as a reason to ask the DAO for a `borrow_cap` reduction rather than as a reason to do nothing —
 there is no way to repoint the feed, and no way to unfreeze it from this repo.
 
-Note the crvUSD instance and the frxUSD instance fail differently here. The frxUSD one reads two
-Chainlink feeds on the same heartbeat, so a Chainlink-wide outage freezes it outright; the crvUSD
-one keeps a live borrowed-token quote from Curve through the same event.
+Note the crvUSD instance keeps a live borrowed-token quote from Curve through a Chainlink-wide
+outage: its borrowed leg is Curve's aggregator, not a Chainlink feed, so only the sterling leg
+can go stale.
 
 ### The feed is paused
 

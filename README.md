@@ -35,11 +35,10 @@ wsgem, copy one, change the constants, done.
 |---|---|---|---|---|
 | wstGBP / tGBP | the gem | `WsgemLlamalendOracle` | [wstgbp.md](docs/instances/wstgbp.md) | oracle live at [`0xdc85…557C`](https://etherscan.io/address/0xdc85a32D5B93e040A4e84401D567DcE02237557C) (2026-08-02), observing across a publication; market not yet deployed |
 | wstGBP / crvUSD | crvUSD | `WsgemFxLlamalendOracle` | [wstgbp-crvusd.md](docs/instances/wstgbp-crvusd.md) | not deployed |
-| wstGBP / frxUSD | frxUSD | `WsgemFxLlamalendOracle` | [wstgbp-frxusd.md](docs/instances/wstgbp-frxusd.md) | not deployed |
 
 The first market borrows the wrapper's own gem, so `burncost()` — the WAD redemption quote — already
 IS Llamalend's collateral-in-borrowed price and the shim carries no scaling term at all. The other
-two borrow a dollar against sterling collateral, which breaks that identity and needs a conversion:
+borrows a dollar against sterling collateral, which breaks that identity and needs a conversion:
 `burncost x GBP/USD / <borrowed>/USD`. Hence a second oracle, not a second parameter.
 
 ## What's here
@@ -52,21 +51,21 @@ two borrow a dollar against sterling collateral, which breaks that identity and 
 | `src/interfaces/` | Solidity translations of Curve's Vyper interfaces, plus the two feed shapes. |
 | `script/WsgemLlamalendDeploy.s.sol` | Generic deploy bases. No token knowledge. |
 | `script/WstGBP.s.sol` | The wstGBP/tGBP deployment. |
-| `script/WstGBPFx.s.sol` | What the two cross-currency wstGBP instances share. |
-| `script/WstGBP{CrvUSD,FrxUSD}.s.sol` | Three values each: the borrowed token, its dollar quote, and that quote's shape. |
+| `script/WstGBPFx.s.sol` | The shared base for cross-currency wstGBP instances. |
+| `script/WstGBPCrvUSD.s.sol` | Three values: the borrowed token, its dollar quote, and that quote's shape. |
 | `script/bytecode/` | Curve's `HyperbolicDynamicMP`, compiled, with provenance and two verification paths. |
 | `docs/` | The runbook. Numbered, ordered, meant to be worked through. |
 | `test/WsgemRateMath.t.sol` | Arithmetic hardening: an independent reference model, boundaries, saturation, ring indices. |
 | `test/WsgemFxLlamalendOracle.t.sol` | The conversion: that the rate limit does not touch it, that each of its failure shapes freezes, and that composing cannot produce a zero. |
-| `test/WstGBP{CrvUSD,FrxUSD}DeployScript.t.sol` | One suite per instance. Its constants, its bounds, and that its deploy rejects every other instance's oracle. |
+| `test/WstGBPCrvUSDDeployScript.t.sol` | One suite per instance. Its constants, its bounds, and that its deploy rejects every other instance's oracle. |
 | `test/fork/` | The real gate: live feed, real `LendFactory`, real market creation — plus what a stepping publication actually costs, measured against a symmetrically damped counterfactual. |
 
 ## Quick start
 
 ```bash
 make deps && make build
-make test          # 320 unit + invariant tests, no RPC
-make test-fork     # 75 tests against live mainnet state (needs ETH_RPC_URL)
+make test          # 296 unit + invariant tests, no RPC
+make test-fork     # 59 tests against live mainnet state (needs ETH_RPC_URL)
 
 make coverage      # first-party src coverage summary to the terminal
 make gen-report    # + HTML report into docs/coverage-report/ (gitignored; needs lcov)
@@ -100,7 +99,7 @@ match a real deploy's.
 | [07-operations.md](docs/07-operations.md) | Privileged surface, alarms, incident response |
 | [08-integration.md](docs/08-integration.md) | For consumers of a deployed market |
 | [reference/addresses.md](docs/reference/addresses.md) | Curve V2 infrastructure, the price feeds, and what was considered and rejected |
-| [instances/](docs/instances/) | One sheet per market: [wstgbp](docs/instances/wstgbp.md), [wstgbp-crvusd](docs/instances/wstgbp-crvusd.md), [wstgbp-frxusd](docs/instances/wstgbp-frxusd.md) |
+| [instances/](docs/instances/) | One sheet per market: [wstgbp](docs/instances/wstgbp.md), [wstgbp-crvusd](docs/instances/wstgbp-crvusd.md) |
 
 ## Two things to know up front
 

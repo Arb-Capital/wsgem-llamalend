@@ -79,8 +79,14 @@ wstGBP/crvUSD with the Swiss franc in place of sterling.
 | Price oracle | `0xa44b313A8D3Fedc6F024EC25CfBF2E15487c1951` |
 | Monetary policy | `0x547De3c2E2960Cc7879EE6626F2763cbc24d4921` |
 
-Its parameters: `A = 180`, `fee = 0.05%`, `loan_discount = 4.3%`, `liquidation_discount = 2.3%`,
-`supply_limit` unlimited. Note it does **not** run `HyperbolicDynamicMP` — its
+Its parameters when this repo copied the risk set (read pre-launch, block ~25689000): `A = 180`,
+`fee = 0.05%`, `loan_discount = 4.3%`, `liquidation_discount = 2.3%`, `supply_limit` unlimited.
+**svZCHF opened for borrowing on 2026-08-12 and re-parameterized around the launch:** verified
+on-chain at block 25746831 (2026-08-13) as `loan_discount = 4.8%` and `liquidation_discount = 2.8%`
+(`A` and `fee` unchanged). This repo raised its `liquidation_discount` to the donor's current **2.8%**
+to keep the buffer no tighter than the franc market (see [04-parameters.md](../04-parameters.md));
+`loan_discount` stays at 5%, above the donor's 4.8%. The donor is not auto-tracked, so re-check both
+here before the DAO cap vote. Note it does **not** run `HyperbolicDynamicMP` — its
 `RATE_CALCULATOR()` reverts — so it is a donor for the risk set only, not for the policy curve.
 
 Its oracle composes `ZCHF/crvUSD x svZCHF.convertToAssets(1e18)` entirely from Curve pool moving
@@ -97,16 +103,13 @@ wrapper's own redemption quote with no conversion term.
 |---|---|---|
 | Chainlink GBP/USD | `0x5c0Ab2d9b5a7ed9f470386e82BB36A3613cDd4b5` | `AggregatorV3`, 8 dec, 24 h heartbeat, 0.15% deviation. Publishes through weekends |
 | Curve crvUSD aggregator | `0x18672b1b0c623a30089A280Ed9256379fb0E4E62` | `price()` → WAD. EMA over five crvUSD/stable pools. Admin is the DAO agent above |
-| Chainlink frxUSD/USD | `0x9B4a96210bc8D9D55b1908B465D8B0de68B7fF83` | `AggregatorV3`, 8 dec, 24 h heartbeat, 0.5% deviation |
 
 Considered and **not** used, recorded so the question is not reopened without the reason:
 
 | | Address / id | Why not |
 |---|---|---|
 | Chainlink CRVUSD/USD | `0xEEf0C605546958c1f899b6fB336C20671f9cD49F` | 0.5% deviation on a token that lives within basis points of a dollar. Curve's own aggregator is what Curve's crvUSD markets read and has no heartbeat |
-| Chainlink FRAX/USD | `0xB9E1E3A9feFf48998E45Fa90847ed4D467E8BcfD` | Prices the LEGACY FRAX token, not frxUSD. Near a percent apart, in the direction that over-values collateral |
 | Chainlink GBP/USD Data Stream | `0x00086bdceb0b66669c04e7315815614f4ad910e6bb0134e2a7b9070145eb2e7b` | Pull-based: a signed report verified in a payable transaction. Llamalend reads `price()` as a `view`. Consuming it needs a keeper pushing reports into storage — the discretionary party this repo exists to remove |
-| Curve frxUSD/crvUSD pool | `0x13e12BB0E6A2f1A3d6901a59a9d585e89A6243e1` | The Curve-native route for frxUSD: one ~$13.5M pool on a 866 s average, divided into the crvUSD aggregator. A dedicated OCR feed is the better of the two |
 
 Confirm any of them before relying on it:
 

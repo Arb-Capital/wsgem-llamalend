@@ -6,8 +6,7 @@ first.
 ```
                           ┌──────────────────────────────────────┐
   Step 1  oracle          │ WsgemLlamalendOracle       (tGBP)    │  make oracle-deploy
-                          │  or WsgemFxLlamalendOracle (crvUSD,  │
-                          │                             frxUSD)  │
+                          │  or WsgemFxLlamalendOracle (crvUSD)  │
                           └──────────────────────────────────────┘
                                         │
   Step 2  observe         ── at least one publication ──          (days, not minutes)
@@ -31,7 +30,6 @@ wstGBP/tGBP.
 |---|---|---|
 | _(unset)_ or `WstGBP` | wstGBP / tGBP | [instances/wstgbp.md](instances/wstgbp.md) |
 | `WstGBPCrvUSD` | wstGBP / crvUSD | [instances/wstgbp-crvusd.md](instances/wstgbp-crvusd.md) |
-| `WstGBPFrxUSD` | wstGBP / frxUSD | [instances/wstgbp-frxusd.md](instances/wstgbp-frxusd.md) |
 
 Pass it as a **command-line assignment to make** — `make market-dry INSTANCE=WstGBPCrvUSD`, not
 `INSTANCE=WstGBPCrvUSD make market-dry`. The Makefile does `-include .env` and then `export`, which
@@ -85,7 +83,7 @@ oracle ............: 0x…
 `price` must equal `burncost()` exactly — the redemption quote, which sits 25 bp below `navprice()`
 for this instance.
 
-Cross-currency (`WstGBPCrvUSD`, `WstGBPFrxUSD`) — `spot` is the quote **converted**, so it equals
+Cross-currency (`WstGBPCrvUSD`) — `spot` is the quote **converted**, so it equals
 `burncost()` only by coincidence. The script prints the legs so the three-term identity can be
 checked by hand:
 
@@ -94,7 +92,7 @@ checked by hand:
 oracle ............: 0x…
   wsgem ...........: 0x57C3571f10767E49C9d7b60feb6c67804783B7aE
   gem .............: 0x27f6c8289550fCE67f6B50BeD1F519966aFE5287
-  borrowed ........: <crvUSD or frxUSD -- NOT the gem>
+  borrowed ........: <crvUSD -- NOT the gem>
   pip .............: 0x6A79dCe61A12aa4b75449e0B03746260765D07dF
   max upside/sec ..: 28935185185
   price ...........: <quote x fx / 1e18>
@@ -240,9 +238,9 @@ satisfies. The result would be a market pricing its collateral in terms of somet
 nothing on-chain would object. `test_anOracleForADifferentAssetIsRejected` demonstrates exactly that
 oracle passing the factory's checks and being refused here.
 
-Every instance adds its own check on top of that shared set, and needs to: the three wstGBP
+Every instance adds its own check on top of that shared set, and needs to: the wstGBP
 instances share a wsgem, a gem, a pip and an upside speed, so the list above passes for **any** of
-their oracles against **any** of their markets. `WSGEM_ORACLE` is one variable serving all three.
+their oracles against **any** of their markets. `WSGEM_ORACLE` is one variable serving them all.
 The cross-currency instances discriminate on `BORROWED()` and the feed addresses; the
 same-currency one on the identity that its undamped spot IS `burncost()`, which a converted price
 fails. The rejection is asserted in both directions, per instance, against mocks and against live
@@ -288,7 +286,6 @@ reading hardest — a market created against the wrong one of either is not reco
 |---|---|---|
 | `WstGBP` | `0x27f6…5287` — tGBP, the gem | the live `burncost()` |
 | `WstGBPCrvUSD` | `0xf939…1b4E` — crvUSD, **not** the gem | the composed price, `burncost x GBP/USD / crvUSD` |
-| `WstGBPFrxUSD` | `0xCAcd…6E29` — frxUSD, **not** the gem | the composed price, `burncost x GBP/USD / frxUSD/USD` |
 
 On a cross-currency instance `price` will sit meaningfully **above** `burncost()` — sterling buys
 more than a dollar — and a `price` that happens to equal `burncost()` there means the wrong oracle
@@ -346,7 +343,7 @@ cast call $CONTROLLER "borrow_cap()(uint256)"             --rpc-url $ETH_RPC_URL
 ```
 
 `VAULT.asset()` is the token the market **borrows**, which is the gem only on the same-currency
-instance. On a cross-currency one it must be `BORROWED()` — crvUSD or frxUSD — and reading the gem
+instance. On a cross-currency one it must be `BORROWED()` — crvUSD — and reading the gem
 back there means the wrong instance was deployed:
 
 ```bash

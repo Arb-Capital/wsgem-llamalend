@@ -177,7 +177,7 @@ defers genuine publications — `test_rateIntervalsAndGap` asserts both.
 
 ## The cross-currency instances
 
-Everything above is the wstGBP/tGBP set. wstGBP/crvUSD and wstGBP/frxUSD carry a different one, and
+Everything above is the wstGBP/tGBP set. wstGBP/crvUSD carries a different one, and
 the reason is not subtle: the sDOLA/crvUSD donor above is a pair of assets that track each other,
 and these markets are sterling collateral against dollar debt. Thirty-five basis point bands against
 a currency pair that moves a percent on an ordinary day would leave borrowers permanently in soft
@@ -186,16 +186,16 @@ liquidation.
 The donor is Curve's **svZCHF/crvUSD** market (controller `0xFd85e847…`), which is the same shape
 with the Swiss franc in place of sterling. See [reference/addresses.md](reference/addresses.md).
 
-| Parameter | wstGBP/tGBP | wstGBP/crvUSD and /frxUSD | Source |
+| Parameter | wstGBP/tGBP | wstGBP/crvUSD | Source |
 |---|---|---|---|
 | `A` | 285 (~35 bp) | **180** (~56 bp) | svZCHF/crvUSD |
 | `fee` | 0.2% | **0.05%** | svZCHF/crvUSD |
-| `loan_discount` | 1.3% | **5%** | svZCHF/crvUSD's 4.3% + 70 bp — see below |
-| `liquidation_discount` | 1% | **2.3%** | svZCHF/crvUSD |
+| `loan_discount` | 1.3% | **5%** | svZCHF/crvUSD's 4.3% (pre-launch) + 70 bp — see below |
+| `liquidation_discount` | 1% | **2.8%** | svZCHF/crvUSD, raised from the pre-launch 2.3% to match the donor's current value — see below |
 | `MAX_FX_AGE` | n/a | **30 hours** | 24 h heartbeat + grace |
 | Everything else | | unchanged | Same wsgem, same feed, same cadence |
 
-The shim and calculator values are deliberately identical across all three markets. The rate limit
+The shim and calculator values are deliberately identical across all markets. The rate limit
 binds on the NAV leg alone, and the NAV leg is the same wsgem publishing on the same weekly cadence
 at the same ~6.8 basis points; nothing about which token is borrowed changes what a mistaken
 publication looks like or how fast it should propagate.
@@ -212,6 +212,23 @@ The threshold is a trigger and not a cap, so it is **not** a bound on how far be
 be: a move that outruns a round leaves it further behind until the next one lands, by however much
 the market travelled meanwhile. The buffer is sized against the ordinary case and deliberately not
 against the fast one.
+
+### The donor has since moved — how this set was reconciled
+
+svZCHF/crvUSD opened for borrowing on 2026-08-12 and re-parameterized around that launch. As read
+on-chain at block 25746831 (2026-08-13) its `loan_discount` is now **4.8%** and its
+`liquidation_discount` **2.8%** — both were 4.3% / 2.3% when this repo copied the set, while `A` and
+`fee` are unchanged. The donor is not auto-tracked, so the two discounts were reconciled deliberately:
+
+- `loan_discount`: **left at 5%.** It is still above the donor's 4.8% (the margin is now +20 bp
+  rather than the +70 bp it was against 4.3%), and the buffer argument above — paying for the
+  Chainlink push feed's lag — is unchanged.
+- `liquidation_discount`: **raised 2.3% → 2.8% to match the donor.** Leaving it at 2.3% would have
+  put the more-volatile sterling pair on a *thinner* liquidation buffer than the franc market it was
+  copied from, which inverts the premise of carrying a wider set at all. Matching restores the
+  ordering: wider than wstGBP/tGBP, and no tighter than the donor.
+
+Re-check both against the live donor once more immediately before the DAO cap vote.
 
 Spent on `loan_discount` rather than `liquidation_discount` on purpose: that moves where a borrower
 may **open** without moving where liquidation begins, so the buffer pays for the borrower's entry
@@ -241,7 +258,7 @@ trade.
 
 It is reused anyway, unchanged, and that is a choice rather than an oversight. The alternative is
 vendoring and byte-verifying a second Curve monetary policy — a large new burden for what is a
-policy preference, and one that would break the property that all three markets run identical
+policy preference, and one that would break the property that all markets run identical
 shim code with identical parameters. Note svZCHF/crvUSD does not use a yield-linked policy at all
 (its `RATE_CALCULATOR()` reverts, and its `target_apr` is 5.28%), so there is no precedent pulling
 the other way either. Worth revisiting before the DAO conversation; not worth blocking on.
@@ -252,7 +269,7 @@ the other way either. Worth revisiting before the DAO conversation; not worth bl
 Llamalend oracle should permit an instantaneous price jump for any reason. That argument covers the
 NAV leg on these instances too — it is the same limit on the same feed — and does **not** cover the
 conversion, which is deliberately unthrottled and moves in discrete Chainlink rounds. No step is
-capped: the deviation thresholds (0.15% GBP/USD, 0.5% frxUSD/USD) trigger rounds rather than
+capped: the deviation threshold (0.15% GBP/USD) triggers rounds rather than
 limiting them, so a fast market steps by several times the threshold and a freeze-and-recover
 delivers the whole accumulated move at once. The reasoning, and why throttling it would
 be worse, is in [02-oracle-shim.md](02-oracle-shim.md#where-the-rate-limit-binds--the-nav-leg-and-nowhere-else);

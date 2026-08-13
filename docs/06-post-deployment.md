@@ -8,7 +8,7 @@ that.
 Only the Curve DAO can. Start the governance conversation before you deploy — it is the slowest
 step, measured in weeks.
 
-**One vote per market.** wstGBP/tGBP, wstGBP/crvUSD and wstGBP/frxUSD each ship with
+**One vote per market.** wstGBP/tGBP and wstGBP/crvUSD each ship with
 `borrow_cap == 0` and each needs its own `set_borrow_cap`. Opening one opens nothing else. The cap
 is also the parameter that bounds what a mistaken publication or a currency shock can cost, so it
 deserves a per-market number rather than a copied one — the cross-currency markets carry a risk the
@@ -88,8 +88,8 @@ or mitigated; precedent documents those assumptions, it does not reduce them.
 
 The proposal should carry the reasoning as well as the addresses:
 
-- The pair. wstGBP/tGBP is like-kind — the collateral wraps the borrowed token. The crvUSD and
-  frxUSD instances are **not**: sterling collateral against dollar debt, with the carry and
+- The pair. wstGBP/tGBP is like-kind — the collateral wraps the borrowed token. The crvUSD
+  instance is **not**: sterling collateral against dollar debt, with the carry and
   tGBP-depeg exposures of [04-parameters.md](04-parameters.md). Claim only what the instance
   being proposed supports.
 - **The NAV is published weekly by a permissioned key and can be paused to zero.** This is the

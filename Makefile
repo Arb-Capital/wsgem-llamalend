@@ -139,7 +139,6 @@ endef
 #
 #   make market-dry                          # wstGBP / tGBP
 #   make market-dry INSTANCE=WstGBPCrvUSD    # wstGBP / crvUSD
-#   make market-dry INSTANCE=WstGBPFrxUSD    # wstGBP / frxUSD
 #
 # Pass it as a COMMAND-LINE assignment to make, exactly as above -- not as an environment
 # variable. This Makefile does `-include .env` and then `export`, which makes every value in .env a

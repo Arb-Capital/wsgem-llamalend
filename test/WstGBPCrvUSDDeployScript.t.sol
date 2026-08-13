@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 
 import {WstGBPCrvUSDOracleScript, WstGBPCrvUSDMarketScript} from "../script/WstGBPCrvUSD.s.sol";
-import {WstGBPFrxUSDMarketScript}                           from "../script/WstGBPFrxUSD.s.sol";
 import {WstGBPMarketScript}                                 from "../script/WstGBP.s.sol";
 
 import {WsgemFxLlamalendOracle} from "../src/WsgemFxLlamalendOracle.sol";
@@ -17,7 +16,6 @@ import {MockPip, MockWsgem} from "./mocks/MockWsgem.sol";
 import {
     StaticDecimals18,
     StaticGbpUsdFeed,
-    StaticStableFeed,
     StaticStableAggregator
 } from "./mocks/MockFeeds.sol";
 
@@ -120,8 +118,8 @@ contract WstGBPCrvUSDDeployScriptTest is Test {
     function test_riskParameters() public view {
         assertEq(marketScript.A(), 180, "svZCHF/crvUSD's A");
         assertEq(marketScript.FEE(), 0.0005e18, "svZCHF/crvUSD's fee");
-        assertEq(marketScript.LOAN_DISCOUNT(), 0.05e18, "svZCHF/crvUSD's 4.3% widened by 70 bp");
-        assertEq(marketScript.LIQUIDATION_DISCOUNT(), 0.023e18, "svZCHF/crvUSD's, unchanged");
+        assertEq(marketScript.LOAN_DISCOUNT(), 0.05e18, "svZCHF/crvUSD's 4.3% (pre-launch) widened by 70 bp");
+        assertEq(marketScript.LIQUIDATION_DISCOUNT(), 0.028e18, "svZCHF/crvUSD's 2.8%, raised from the pre-launch 2.3% to match");
         assertEq(marketScript.SUPPLY_LIMIT(), type(uint256).max);
     }
 
@@ -239,10 +237,6 @@ contract CrvUSDValidationHarness is WstGBPCrvUSDMarketScript {
 ///      single environment variable serving every instance. This suite is the reason a mistake
 ///      there stops at the preflight instead of producing a market priced in the wrong currency.
 ///
-///      The sibling instance's script IS imported here, and only here: the hazard is specifically
-///      confusing these two markets, and a test that invented a hypothetical foreign oracle would
-///      be testing something weaker than the thing that will actually go wrong.
-///
 ///      Runs against stand-ins etched at the production addresses rather than against mainnet, so
 ///      it is part of `make test`: the confusion is a property of the configuration, not of live
 ///      state. The stand-ins keep every answer in code because `vm.etch` copies code, not storage.
@@ -252,15 +246,13 @@ contract WstGBPCrvUSDOracleValidationTest is Test {
 
     MockPip internal pip;
 
-    CrvUSDValidationHarness  internal harness;
-    WstGBPFrxUSDMarketScript internal sibling;
+    CrvUSDValidationHarness internal harness;
 
     function setUp() public {
         vm.warp(1_800_000_000);
         pip = new MockPip(1.05e18);
 
         harness = new CrvUSDValidationHarness();
-        sibling = new WstGBPFrxUSDMarketScript();
 
         // The scripts' addresses are compile-time constants, so the stand-ins are moved to them
         // rather than the other way around. The wsgem is built first with its immutables already
@@ -273,10 +265,6 @@ contract WstGBPCrvUSDOracleValidationTest is Test {
 
         vm.etch(harness.BORROWED(), type(StaticDecimals18).runtimeCode);
         vm.etch(harness.BORROWED_QUOTE(), type(StaticStableAggregator).runtimeCode);
-
-        // And the sibling's two, so an oracle wired for it can actually be built.
-        vm.etch(sibling.BORROWED(), type(StaticDecimals18).runtimeCode);
-        vm.etch(sibling.BORROWED_QUOTE(), type(StaticStableFeed).runtimeCode);
     }
 
     function _oracle(address borrowed_, address quote_, WsgemFxLlamalendOracle.QuoteKind kind_)
@@ -313,15 +301,6 @@ contract WstGBPCrvUSDOracleValidationTest is Test {
 
         vm.expectRevert();
         harness.assertOracle(address(plain_));
-    }
-
-    function test_theFrxUsdInstancesOracleIsRejected() public {
-        WsgemFxLlamalendOracle wrong_ = _oracle(
-            sibling.BORROWED(), sibling.BORROWED_QUOTE(), sibling.BORROWED_QUOTE_KIND()
-        );
-
-        vm.expectRevert(bytes("oracle: borrowed mismatch"));
-        harness.assertOracle(address(wrong_));
     }
 
     /// @dev The subtler half: right borrowed token, wrong source for its price. Nothing about the

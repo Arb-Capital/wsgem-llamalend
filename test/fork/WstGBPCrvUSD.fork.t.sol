@@ -20,7 +20,6 @@ import {IHyperbolicDynamicMP}   from "../../src/interfaces/IMonetaryPolicy.sol";
 import {IDecimals}              from "../../src/interfaces/IDecimals.sol";
 
 import {WstGBPCrvUSDMarketScript} from "../../script/WstGBPCrvUSD.s.sol";
-import {WstGBPFrxUSDMarketScript} from "../../script/WstGBPFrxUSD.s.sol";
 import {WstGBPMarketScript}       from "../../script/WstGBP.s.sol";
 
 /// @dev This instance's internal validation, exposed so a live oracle can be run through the exact
@@ -220,32 +219,6 @@ contract WstGBPCrvUSDForkTest is Test {
     function test_thisInstanceAcceptsItsOwnLiveOracle() public {
         CrvUSDForkHarness h_ = new CrvUSDForkHarness();
         h_.assertOracle(address(_deploy()));
-    }
-
-    /// @dev Against live addresses, not mocks: the two cross-currency instances' oracles are
-    ///      indistinguishable on every shared check, and `WSGEM_ORACLE` is one variable serving
-    ///      both.
-    function test_theFrxUsdInstancesLiveOracleIsRejected() public {
-        WstGBPFrxUSDMarketScript frx_ = new WstGBPFrxUSDMarketScript();
-        WsgemFxLlamalendOracle wrong_ = new WsgemFxLlamalendOracle(
-            IWsgem(WSGEM),
-            frx_.BORROWED(),
-            IChainlinkAggregator(frx_.FX_FEED()),
-            frx_.BORROWED_QUOTE(),
-            frx_.BORROWED_QUOTE_KIND(),
-            frx_.MAX_UPSIDE_SPEED(),
-            frx_.MAX_FX_AGE()
-        );
-
-        // It would sail through the factory, and through every wiring check the instances share.
-        assertGt(wrong_.price(), 0);
-        assertEq(wrong_.price_w(), wrong_.price());
-        assertEq(address(wrong_.WSGEM()), cfg.WSGEM());
-        assertEq(wrong_.GEM(), cfg.GEM());
-
-        CrvUSDForkHarness h_ = new CrvUSDForkHarness();
-        vm.expectRevert(bytes("oracle: borrowed mismatch"));
-        h_.assertOracle(address(wrong_));
     }
 
     function test_theSameCurrencyLiveOracleIsRejected() public {

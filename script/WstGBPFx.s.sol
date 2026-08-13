@@ -20,7 +20,7 @@ import {IChainlinkAggregator}   from "../src/interfaces/IChainlinkAggregator.sol
 ///      decision, and nothing in the test suite catches prose drifting apart.
 ///
 ///      Every value here is asserted by each instance's OWN suite --
-///      test/WstGBPCrvUSDDeployScript.t.sol and test/WstGBPFrxUSDDeployScript.t.sol -- reading it
+///      test/WstGBPCrvUSDDeployScript.t.sol -- reading it
 ///      through that instance's script rather than through this base. A suite that read these
 ///      values from here would prove only that the base is self-consistent with itself.
 abstract contract WstGBPFxConstants {
@@ -120,8 +120,10 @@ abstract contract WstGBPFxConstants {
     ///      mechanical.
     uint256 internal constant FEE_WSTGBP_FX = 0.0005e18;
 
-    /// @dev 5%, which is svZCHF/crvUSD's 4.3% plus 70 basis points, and the 70 is the one number in
-    ///      this file that is ours rather than inherited.
+    /// @dev 5%, which is svZCHF/crvUSD's 4.3% at copy time plus 70 basis points, and the 70 is the
+    ///      one number in this file that is ours rather than inherited. (The donor re-parameterized
+    ///      to 4.8% at its 2026-08-12 launch, so the live margin is now +20 bp; ours is unchanged
+    ///      pending the parameter review -- see docs/04-parameters.md.)
     ///
     ///      What it pays for: svZCHF/crvUSD's oracle composes Curve pool moving averages, which
     ///      move with every trade. Ours composes a Chainlink push feed, which moves only when a
@@ -141,11 +143,14 @@ abstract contract WstGBPFxConstants {
     ///      what the liquidation discount below and the borrow cap are for.
     uint256 internal constant LOAN_DISCOUNT_WSTGBP_FX = 0.05e18;
 
-    /// @dev 2.3%, svZCHF/crvUSD's value, left alone. Widening the loan discount and leaving this
-    ///      is the deliberate shape: it moves where a borrower may OPEN without moving where
-    ///      liquidation begins, so the extra buffer is spent on the borrower's entry rather than on
-    ///      giving a soft-liquidating position more room to keep losing.
-    uint256 internal constant LIQUIDATION_DISCOUNT_WSTGBP_FX = 0.023e18;
+    /// @dev 2.8%, matching svZCHF/crvUSD's liquidation discount. It was originally set to the donor's
+    ///      then-current 2.3% while only the loan discount was widened; the donor raised both
+    ///      discounts +50 bp at its 2026-08-12 launch (to 4.8% / 2.8%), so this was lifted to 2.8% to
+    ///      keep the liquidation buffer no tighter than the less-volatile franc market it is copied
+    ///      from -- leaving the more-volatile sterling pair with a thinner buffer would have inverted
+    ///      the reason for carrying a wider set at all. The loan discount stays at 5%, still above the
+    ///      donor's 4.8%. See docs/04-parameters.md.
+    uint256 internal constant LIQUIDATION_DISCOUNT_WSTGBP_FX = 0.028e18;
 
     /// @dev Unlimited vault deposits, as the first instance. This is not the borrow cap -- that is
     ///      separate, starts at zero, and only a Curve DAO vote can lift it.
@@ -290,7 +295,7 @@ abstract contract WstGBPFxScript is WsgemLlamalendScript, WstGBPFxConstants {
     ///
     ///      `BORROWED()` is the discriminator against the tGBP shim, which does not have it, so
     ///      the call reverts rather than returning something plausible. `BORROWED_QUOTE()` is the
-    ///      discriminator between two cross-currency instances, which have identical everything
+    ///      discriminator between cross-currency instances, which have identical everything
     ///      else.
     function _assertOracleExtra(IWsgemShimOracle oracle_) internal view virtual override {
         WsgemFxLlamalendOracle fx_ = WsgemFxLlamalendOracle(address(oracle_));

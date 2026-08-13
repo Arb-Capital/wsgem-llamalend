@@ -80,8 +80,8 @@ which is this market with the Swiss franc in place of sterling.
 | `MIN_CHECKPOINT_SPACING` | 1 day | Unchanged |
 | `A` | 180 (~56 bp bands) | svZCHF/crvUSD. 285 would leave borrowers permanently in soft liquidation against a currency pair |
 | `fee` | 0.05% | svZCHF/crvUSD. The AMM cap at A = 180 is ~2.22%, so the constraint is economic |
-| `loan_discount` | **5%** | svZCHF/crvUSD's 4.3% + 70 bp. See below — the one number here that is ours |
-| `liquidation_discount` | 2.3% | svZCHF/crvUSD, unchanged |
+| `loan_discount` | **5%** | svZCHF/crvUSD's 4.3% (pre-launch) + 70 bp. See below — the one number here that is ours |
+| `liquidation_discount` | 2.8% | Matches svZCHF/crvUSD's current value; raised from the donor's pre-launch 2.3% — see [reference/addresses.md](../reference/addresses.md) |
 | `supply_limit` | unlimited | Not the borrow cap, which starts at zero |
 | `target_utilization` | 90% | From the first instance; svZCHF/crvUSD runs a different policy contract entirely |
 | `low_ratio` / `high_ratio` / `rate_shift` | 0.5 / 5 / 0 | Same |
@@ -131,18 +131,18 @@ borrower's entry rather than giving a soft-liquidating position more room to kee
 | `borrow_cap` | |
 | `admin_percentage` | |
 
-This vote is **separate** from the wstGBP/tGBP market's and from wstGBP/frxUSD's. Each market ships
+This vote is **separate** from the wstGBP/tGBP market's. Each market ships
 with `borrow_cap == 0` and each needs its own.
 
 ## Instance-specific notes
 
-**`WSGEM_ORACLE` is one variable serving three instances.** Every wstGBP instance shares a wsgem, a
+**`WSGEM_ORACLE` is one variable serving every instance.** Every wstGBP instance shares a wsgem, a
 gem, a pip and an upside speed, so any of their oracles passes every wiring check the deploy scripts
 share — a live, healthy, self-consistent oracle for the wrong market is the one failure nothing
 on-chain catches. What catches it is `_assertOracleExtra`, which each instance overrides with
 something true only of its own oracle. Pinned by `test/WstGBPCrvUSDDeployScript.t.sol` against
-mocks and by `test/fork/WstGBPCrvUSD.fork.t.sol` against live addresses — and symmetrically by the
-frxUSD instance's own two suites. `make` echoes the pairing before every run.
+mocks and by `test/fork/WstGBPCrvUSD.fork.t.sol` against live addresses. `make` echoes the pairing
+before every run.
 
 **The conversion permits instantaneous price steps, by design.** Curve's post-sDOLA rule asks that
 no Llamalend oracle permit an instantaneous jump for any reason; the NAV leg meets it, the
