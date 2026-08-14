@@ -65,7 +65,7 @@ borrows a dollar against sterling collateral, which breaks that identity and nee
 ```bash
 make deps && make build
 make test          # 296 unit + invariant tests, no RPC
-make test-fork     # 62 tests against live mainnet state (needs ETH_RPC_URL)
+make test-fork     # 64 tests against live mainnet state (needs ETH_RPC_URL)
 
 make coverage      # first-party src coverage summary to the terminal
 make gen-report    # + HTML report into docs/coverage-report/ (gitignored; needs lcov)

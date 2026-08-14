@@ -94,7 +94,7 @@ Full address list in [reference/addresses.md](reference/addresses.md).
 
 ```bash
 make test        # 296 unit + invariant tests, no RPC
-make test-fork   # 62 fork tests against live mainnet state
+make test-fork   # 64 fork tests against live mainnet state
 make coverage    # first-party src coverage (excludes fork tests and the gas bench)
 ```
 

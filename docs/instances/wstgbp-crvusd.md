@@ -101,6 +101,57 @@ It is spent on `loan_discount` and not on `liquidation_discount` deliberately: t
 borrower may **open** without moving where liquidation begins, so the buffer pays for the
 borrower's entry rather than giving a soft-liquidating position more room to keep losing.
 
+## The liquidation exit
+
+The first instance's liquidator-exit argument — redemption is atomic, against the full supply,
+slippage-free at the bid — ends one token short here: redemption pays **tGBP**, and the debt to
+repay is **crvUSD**. The leg between them is a market question, not a contract property, so this
+section records a dated measurement and a rule, not a constant. tGBP is growing; every number
+below is a snapshot input to the rule, to be re-measured in the cap proposal itself and at each
+[quarterly review](../07-operations.md).
+
+Measured 2026-08-13, block 25749090:
+
+| Venue | Depth | Note |
+|---|---|---|
+| Curve tGBP/frxUSD [`0x51a57b0a…`](https://etherscan.io/address/0x51a57b0a36ef63828929683609fa1fc12C72A776) | 37,400 tGBP + 56,069 frxUSD | the only funded Curve pool; six other tGBP pools exist empty or at dust |
+| Uniswap v3 tGBP/USDC 0.05% [`0xD38b119E…`](https://etherscan.io/address/0xD38b119E15a147D4E9311F8277C8Ef1fdc9300C9) | 39,791 tGBP + 71,856 USDC | |
+| Morpho WETH/tGBP (Steakhouse) | 34,596 tGBP supplied, ~87% utilized | a money market, not an exit |
+
+USD-side inventory across the funded venues: **≈ $128k**. Impact selling tGBP into the Curve pool
+(`get_dy`, against GBP/USD 1.34828): 10k tGBP −0.39%, 20k −0.84%, 30k −1.79%. Against a 2.8%
+`liquidation_discount` that is the entire margin: a single hard liquidation of roughly **40–60k
+tGBP** across both venues exhausts profitability. Beyond that a liquidator must either warehouse
+tGBP (the *currency* leg hedges trivially off-chain — GBP is the deepest FX pair there is — but
+the *token* leg does not), or redeem with the issuer, a path this repo has not verified and the
+cap proposal should not assume.
+
+Two facts found while measuring, recorded because they change the failure picture:
+
+- **tGBP exposes `paused()`** (false at the measurement block). A paused gem freezes the wrapper's
+  redemption payout and every DEX exit in the same stroke. The response is the pre-drafted
+  cap-to-zero vote in [../reference/emergency-halt.md](../reference/emergency-halt.md); nothing in
+  the oracle notices. wstGBP itself exposes no pause or blocklist surface beyond the redemption
+  path's `canPass`.
+- **The donor market has never processed a liquidation.** svZCHF/crvUSD carries ~$101k supplied
+  and zero borrows ever taken, and its own liquidator venue (the zCHF/svZCHF pool) sits unseeded
+  at zero balance. The risk set copied from it is reasoned, not battle-tested — a market can exist
+  with no liquidation supply chain behind it, and the donor is the proof.
+
+### The borrow cap follows the exit
+
+Rule: the initial `borrow_cap` should sit at or below the measured USD-side inventory of the
+funded tGBP venues at the time of the vote, so that even the whole book liquidating into a bad
+tape clears through venues that exist rather than through an assumption. As measured today that
+is ≈ $128k, and the donor market's whole vault is ~$101k:
+
+**Proposed initial `borrow_cap`: 100,000 crvUSD.**
+
+Raise it by later votes as measured depth grows — the measurement above is three `cast call`s and
+a `get_dy` sweep, cheap enough to re-run in every proposal. The cap is the standing mitigation for
+both unpriced exposures this instance carries (tGBP de-peg, sterling-anchored rate on dollar
+debt); its size should never outrun the exit.
+
 ## Deployed addresses
 
 ### Oracle — step 1 of [../05-deploy-mainnet.md](../05-deploy-mainnet.md)

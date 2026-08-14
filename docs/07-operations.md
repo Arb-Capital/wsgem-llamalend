@@ -345,6 +345,10 @@ design.
 is the correct shape for an emergency stop — a halt that also blocked repayment would trap
 borrowers in positions they were trying to unwind.
 
+The vote is drafted in advance — triggers, calldata, proposal text and the re-opening bar — in
+[reference/emergency-halt.md](reference/emergency-halt.md). A vote follows the ordinary governance
+timeline, so drafting it during the incident is the delay the draft exists to remove.
+
 ## Periodic review
 
 | Cadence | Check |
